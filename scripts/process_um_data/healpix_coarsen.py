@@ -24,12 +24,16 @@ def map_regional_to_global(_da, src_zoom, dim):
     }
     coords['cell'] = np.arange(12 * 4 ** src_zoom)
 
-    if dim == '2d':
-        dims = ['time', 'cell']
-    elif dim == '3d':
-        dims = ['time', 'pressure', 'cell']
-    # dims = [d for d in coords if d != 'crs']
-    shape = list(_da.shape[:-1]) + [len(coords['cell'])]
+    if _da.name == 'weights':
+        dims = ['cell']
+        shape = [len(coords['cell'])]
+    else:
+        if dim == '2d':
+            dims = ['time', 'cell']
+        elif dim == '3d':
+            dims = ['time', 'pressure', 'cell']
+        # dims = [d for d in coords if d != 'crs']
+        shape = list(_da.shape[:-1]) + [len(coords['cell'])]
     # Would be nice, but it's actually quite a bit slower?
     # dummies = dask.array.zeros(shape, dtype=np.float32)
     # da_new = xr.DataArray(dummies, dims=dims, name=_da.name, coords=coords)
@@ -49,12 +53,16 @@ def map_global_to_regional(_da, src_ds_region, tgt_ds_store, dim):
         if n != 'cell'
     }
     coords['cell'] = tgt_ds_store.cell
-    if dim == '2d':
-        dims = ['time', 'cell']
-    elif dim == '3d':
-        dims = ['time', 'pressure', 'cell']
-    da = list(src_ds_region.data_vars.values())[0]
-    shape = list(da.shape[:-1]) + [len(coords['cell'])]
+    if _da.name == 'weights':
+        dims = ['cell']
+        shape = [len(coords['cell'])]
+    else:
+        if dim == '2d':
+            dims = ['time', 'cell']
+        elif dim == '3d':
+            dims = ['time', 'pressure', 'cell']
+        da = list(src_ds_region.data_vars.values())[0]
+        shape = list(da.shape[:-1]) + [len(coords['cell'])]
 
     da_new = xr.DataArray(np.full(shape, np.nan, np.float32), dims=dims, name=_da.name, coords=coords)
     da_new.values = _da.isel(cell=tgt_ds_store.cell.values)
@@ -62,17 +70,12 @@ def map_global_to_regional(_da, src_ds_region, tgt_ds_store, dim):
 
 
 def calc_tgt_weights(src_ds, src_ds_region, tgt_ds, tgt_zoom, dim):
-    if 'weights' in src_ds_region:
-        # TODO: Need to handle lower zooms when weights already exist.
-        src_weights = src_ds_region['weights']
-        weights = src_weights.coarsen(cell=4).mean()
-    else:
-        # It is enough to calc the weights for one field, and store.
-        if dim == '2d':
-            src_da = list(src_ds.data_vars.values())[0].isel(time=0)
-        elif dim == '3d':
-            src_da = list(src_ds.data_vars.values())[0].isel(time=0, pressure=0)
-        weights = src_da.coarsen(cell=4).reduce(nan_weight).compute()
+    # It is enough to calc the weights for one field, and store.
+    if dim == '2d':
+        src_da = list(src_ds.data_vars.values())[0].isel(time=0)
+    elif dim == '3d':
+        src_da = list(src_ds.data_vars.values())[0].isel(time=0, pressure=0)
+    weights = src_da.coarsen(cell=4).reduce(nan_weight).compute()
     cells = np.arange(12 * 4 ** tgt_zoom)
     coords = {'cell': cells}
     # Use a global weights DataArray to convert between the src domain and the tgt domain.
@@ -94,6 +97,9 @@ def coarsen_healpix_zarr_region(src_ds, tgt_store, tgt_zoom, dim, start_idx, end
 
     src_ds_region = src_ds.isel(time=time_slice)
     if regional:
+        if dim == '3d' and 'weights' in src_ds.data_vars.keys():
+            logger.debug('drop weights')
+            src_ds_region = src_ds_region.drop_vars('weights')
         src_ds_region = src_ds_region.map(map_regional_to_global, src_zoom=src_zoom, dim=dim)
 
     # To compute or not to compute...
@@ -116,7 +122,7 @@ def coarsen_healpix_zarr_region(src_ds, tgt_store, tgt_zoom, dim, start_idx, end
         zarr_chunks = {'time': chunks[tgt_zoom][0], 'cell': -1}
         tgt_ds_store = xr.open_zarr(tgt_store, chunks=zarr_chunks)
         tgt_ds = tgt_ds.map(map_global_to_regional, src_ds_region=src_ds_region, tgt_ds_store=tgt_ds_store, dim=dim)
-        if src_ds_region.time[0] == src_ds.time[0]:
+        if (src_ds_region.time[0] == src_ds.time[0]) and 'weights' not in src_ds.data_vars:
             tgt_weights = calc_tgt_weights(src_ds, src_ds_region, tgt_ds, tgt_zoom, dim)
             # TODO: Need to create weights in empty zarr store for this to work.
             tgt_ds['weights'] = tgt_weights
@@ -139,9 +145,20 @@ def coarsen_healpix_zarr_region(src_ds, tgt_store, tgt_zoom, dim, start_idx, end
             continue
         logger.debug(f'  writing {da.name}')
         if da.name == 'weights':
-            asyncio.run(async_da_to_zarr_with_retries(da.chunk({'cell': preferred_chunks['cell']}), tgt_store, region))
-        else:
-            asyncio.run(async_da_to_zarr_with_retries(da.chunk(preferred_chunks), tgt_store, region))
+            if src_ds_region.time[0] == src_ds.time[0]:
+                if dim == '2d':
+                    region = {'cell': slice(None)}
+                    asyncio.run(
+                        async_da_to_zarr_with_retries(da.chunk({'cell': preferred_chunks['cell']}), tgt_store, region))
+                elif dim == '3d':
+                    # TODO: still causes error due to dims mismatch.
+                    logger.warning('Not writing weights for 3D data')
+                    # region = {'pressure': slice(None), 'cell': slice(None)}
+                    # asyncio.run(
+                    #     async_da_to_zarr_with_retries(da.chunk({'cell': preferred_chunks['cell']}), tgt_store, region))
+            continue
+        asyncio.run(
+            async_da_to_zarr_with_retries(da.chunk({'cell': preferred_chunks['cell']}), tgt_store, region))
 
 
 async def async_da_to_zarr_with_retries(da, store, region, max_retries=5):

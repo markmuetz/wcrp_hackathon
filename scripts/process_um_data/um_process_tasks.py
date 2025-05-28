@@ -23,7 +23,7 @@ import xarray as xr
 from iris.experimental.stratify import relevel
 from loguru import logger
 
-from processing_config import processing_config, shared_metadata
+from processing_config import processing_config, shared_metadata, cube_cell_method_is_not_empty
 from healpix_coarsen import coarsen_healpix_zarr_region, async_da_to_zarr_with_retries
 from um_latlon_pp_to_healpix_nc import UMLatLon2HealpixRegridder, gen_weights, get_limited_healpix
 
@@ -112,7 +112,7 @@ def da_to_zarr(da, zarr_store_url_tpl, group_name, group, zoom, regional, nan_ch
         if not regional and np.isnan(da.values).any():
             logger.warning(f'da {da.name} contains NaNs')
 
-    if group_name == '2d':
+    if group_name.startswith('2d'):
         region = {zarr_time_name: slice(idx, idx + len(da[zarr_time_name])), 'cell': slice(None)}
     elif group_name.startswith('3d'):
         region = {zarr_time_name: slice(idx, idx + len(da[zarr_time_name])), 'pressure': slice(None),
@@ -364,7 +364,10 @@ class UMProcessTasks:
         return da_tpl, short_name
 
     def regrid(self, task):
+        # TODO: proc_extra_vars: only load nec.
+        # Speed up for CoMA9_inst.
         inpaths = task['inpaths']
+        # inpaths = task['inpaths'][1:2]
 
         logger.info('loading cubes')
         logger.trace(inpaths)
@@ -373,6 +376,7 @@ class UMProcessTasks:
         add_cyclic = self.config.get('add_cyclic', True)
         regional = self.config.get('regional', False)
 
+        # TODO: proc_extra_vars: maybe not avail.
         p = cubes.extract_cube('air_pressure')
         z = cubes.extract_cube('geopotential_height')
 
@@ -387,16 +391,23 @@ class UMProcessTasks:
                 logger.info(f'Regridding {name}')
                 constraint = group['extra_constraints'].get(name, name)
                 try:
-                    cube = group_cubes.extract_cube(constraint)
+                    if self.config.get('name', '').startswith('glm.n1280_GAL9_nest') and name == 'stratiform_rainfall_flux':
+                        cube = group_cubes.extract_cube(constraint)
+                        constraint2 = (iris.Constraint(name='convective_rainfall_flux') & iris.Constraint(
+                            cube_func=cube_cell_method_is_not_empty))
+                        cube2 = group_cubes.extract_cube(constraint2)
+                        cube.data += cube2.data
+                    else:
+                        cube = group_cubes.extract_cube(constraint)
                 except iris.exceptions.ConstraintMismatchError as e:
                     logger.debug(f'cube {name} not present')
                     continue
+                cubes.remove(cube)
                 if 'extra_processing' in group and name in group['extra_processing']:
                     fn = group['extra_processing'][name]
                     logger.debug(f'applying {fn} to {name}')
                     cube = fn(cube)
 
-                cubes.remove(cube)
                 if group.get('interpolate_model_levels_to_pressure', False):
                     cube = model_level_to_pressure(cube, p, z)
 
@@ -435,8 +446,11 @@ class UMProcessTasks:
         chunks = self.config['groups'][dim]['chunks']
         zarr_chunks = {'time': chunks[tgt_zoom][0], 'cell': -1}
         src_ds = xr.open_zarr(src_store, chunks=zarr_chunks)
+        # TODO: DO NOT LEAVE IN!!!
+        # src_ds = src_ds[['pr']]
         regional = self.config['regional']
 
+        # TODO:
         cluster = LocalCluster()  # Fully-featured local Dask cluster
         client = cluster.get_client()
         logger.debug(cluster)
@@ -528,20 +542,30 @@ def add_orog_land_sea(config_key):
             },
         )
 
-        for freq in ['PT1H', 'PT3H']:
-            if zoom == 10:
-                continue
-            store_url = zarr_store_url_tpl.format(freq=freq, zoom=zoom)
-            logger.info(f'Writing z{zoom} orog/land-sea to {freq}: {store_url}')
-            zarr_store = s3fs.S3Map(
-                root=store_url,
-                s3=jasmin_s3, check=False)
+        freq = 'static'
+        store_url = zarr_store_url_tpl.format(freq=freq, zoom=zoom)
+        logger.info(f'Writing z{zoom} orog/land-sea to {freq}: {store_url}')
+        zarr_store = s3fs.S3Map(
+            root=store_url,
+            s3=jasmin_s3, check=False)
 
-            ds_static = xr.Dataset()
-            ds_static['orog'] = hporog.copy().assign_coords(crs=crs)
-            ds_static['sftlf'] = hpland.copy().assign_coords(crs=crs)
-            print(ds_static)
-            ds_static.to_zarr(zarr_store, mode='a')
+        ds_static = xr.Dataset()
+        ds_static['orog'] = hporog.copy().assign_coords(crs=crs)
+        ds_static['sftlf'] = hpland.copy().assign_coords(crs=crs)
+        print(ds_static)
+        ds_static.to_zarr(zarr_store, mode='a')
+        # for freq in ['PT1H', 'PT3H']:
+        #     store_url = zarr_store_url_tpl.format(freq=freq, zoom=zoom)
+        #     logger.info(f'Writing z{zoom} orog/land-sea to {freq}: {store_url}')
+        #     zarr_store = s3fs.S3Map(
+        #         root=store_url,
+        #         s3=jasmin_s3, check=False)
+        #
+        #     ds_static = xr.Dataset()
+        #     ds_static['orog'] = hporog.copy().assign_coords(crs=crs)
+        #     ds_static['sftlf'] = hpland.copy().assign_coords(crs=crs)
+        #     print(ds_static)
+        #     ds_static.to_zarr(zarr_store, mode='a')
 
 
 if __name__ == '__main__':
@@ -554,7 +578,7 @@ if __name__ == '__main__':
     logger.debug('{} last edited: {:%Y-%m-%d %H:%M:%S}'.format(filepath.name,
                                                                dt.datetime.fromtimestamp(filepath.stat().st_mtime)))
 
-    logger.debug(sys.argv)
+    logger.debug(' '.join(sys.argv))
 
     if sys.argv[1] == 'slurm':
         tasks_path = sys.argv[2]

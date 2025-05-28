@@ -30,7 +30,7 @@ SLURM_SCRIPT_ARRAY = """#!/bin/bash
 #SBATCH -e slurm/output/{job_name}_{config_key}_{date_string}_%A_%a.err
 #SBATCH --comment={comment}
 # These nodes repeatedly fail to be able to read the kscale GWS.
-#SBATCH --exclude=host1012,host1077,host1087,host1106,host1186,host1080,host1197
+#SBATCH --exclude=host1012,host1077,host1087,host1106,host1186,host1080,host1197,host1135,host1238,host1222,host1234
 {dependency}
 
 # Quick check to see if it can access the kscale GWS.
@@ -191,7 +191,8 @@ def process(ctx, config_key):
     for date in dates_to_paths:
         # if not (date.year == 2020 and date.month == 1):
         #     continue
-        if date == config['first_date']:
+        # TODO!! don't leave in.
+        if date == config['first_date'] and False:
             create_donepath = donedir / donepath_tpl.format(task='create_empty_zarr_store', date=date)
             logger.debug(create_donepath)
             if not create_donepath.exists():
@@ -231,6 +232,7 @@ def process(ctx, config_key):
     regrid_jobid = None
     if len(tasks):
         logger.info(f'Running {len(tasks)} tasks')
+        # TODO: proc_extra_vars: reduce mem. (16000 is fine)
         slurm_script_path = write_tasks_slurm_job_array(config_key, tasks, 'regrid',
                                                         nconcurrent_tasks=nconcurrent_tasks,
                                                         depends_on=create_jobid)
@@ -247,12 +249,12 @@ def process(ctx, config_key):
 
 
 @cli.command()
-@click.option('--nbatch', '-N', default=5)
+@click.option('--nbatch', '-B', default=5)
 @click.option('--endtime', '-E', default='2021-03-01 00:00')
 @click.argument('config_key')
 @click.pass_context
 def coarsen(ctx, nbatch, endtime, config_key):
-    # This needs to be it's own command. The reason is that I need to be able to examine a completed
+    # This needs to be its own command. The reason is that I need to be able to examine a completed
     # zarr store to be able to work out how to divvy up the work. This can only been done once the above have completed,
     # and can't be calculated in advance. It would be possible to have a job whose sole purpose was to do this calc and
     # then launch other jobs, but this seems overly complicated. Just wait until these have completed then launch.
@@ -276,7 +278,9 @@ def coarsen(ctx, nbatch, endtime, config_key):
     dummy_donepath_tpl = config['donepath_tpl']
     dummy_donepath = dummy_donepath_tpl.format(task='dummy', date='dummy')
     donereldir = Path(dummy_donepath).parent
+    # TODO: changed for GAL9_strat_conv_pr.
     donepath_tpl = str(config['donedir'] / donereldir / 'coarsen/{dim}/z{zoom}/{job_id}.done')
+    # donepath_tpl = str(config['donedir'] / donereldir / 'coarsen/{dim}/z{zoom}/{job_id}.GAL9_strat_conv_pr.done')
 
     max_zoom = config['max_zoom']
 
@@ -325,6 +329,7 @@ def coarsen(ctx, nbatch, endtime, config_key):
                 if dim == '3d':
                     mem = 256000
                 else:
+                    # TODO
                     mem = 100000
                 # The heart of this method is a ds.coarsen(cell=4).mean() call.
                 # This benefits massively from a dask speed up.
@@ -334,12 +339,12 @@ def coarsen(ctx, nbatch, endtime, config_key):
                     depends_on=prev_zoom_job_id,
                     partition='standard',
                     nconcurrent_tasks=nconcurrent_tasks,
+                    mem=mem,
                     qos='high',
                     # I think you have to use 48 (instead of 12 - only two checked) because
                     # otherwise you get multiple dask LocalClusters starting on same node.
                     # cpus_per_task=48,  # maxes out at 6 tasks/288 cpus because of max cpus.
                     cpus_per_task=12,  # maxes out at 24 tasks/288 cpus because of max cpus.
-                    mem=mem,
                 )
 
                 logger.debug(slurm_script_path)

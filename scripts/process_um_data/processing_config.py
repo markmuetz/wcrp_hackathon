@@ -32,6 +32,10 @@ def cube_cell_method_is_not_empty(cube):
     return cube.cell_methods != tuple()
 
 
+def cube_cell_method_is_empty(cube):
+    return cube.cell_methods == tuple()
+
+
 name_map_2d = {
     'air_pressure_at_sea_level': ('air_pressure_at_mean_sea_level', 'psl'),
     'air_temperature': ('air_temperature', 'tas'),
@@ -62,6 +66,15 @@ name_map_2d = {
     'toa_outgoing_longwave_flux_assuming_clear_sky': ('toa_outgoing_longwave_flux_clear_sky', 'rlutcs'),
     'toa_outgoing_shortwave_flux': ('toa_outgoing_shortwave_flux', 'rsut'),
     'toa_outgoing_shortwave_flux_assuming_clear_sky': ('toa_outgoing_shortwave_flux_clear_sky', 'rsutcs'),
+}
+
+name_map_2d_missing = {
+    'm01s01i202': ('surface_upwelling_shortwave_flux_in_air', 'rsus'),
+    'surface_net_downward_longwave_flux': ('surface_upwelling_longwave_flux_in_air', 'rlus'),
+}
+
+name_map_2d_CoMA9_instantaneous = {
+    'precipitation_flux': ('precipitation_flux', 'pr'),
 }
 
 name_map_3d = {
@@ -176,6 +189,7 @@ drop_vars = [
 
 time2d = pd.date_range('2020-01-20', '2021-04-01', freq='h')
 time3d = pd.date_range('2020-01-20', '2021-04-01', freq='3h')
+timeP1D = pd.date_range('2020-01-20', '2021-04-01', freq='D')
 
 
 
@@ -184,6 +198,13 @@ def invert_cube_sign(cube):
     return cube
 
 
+def check_cube_time_length(cube):
+    if cube.shape[0] == 13:
+        cube = cube[1:]
+    return cube
+
+
+# CoMA9 use instantaneous values total precip flux: 5, 216.
 group2d = {
     'time': time2d,
     'zarr_store': 'PT1H',
@@ -208,6 +229,60 @@ group2d = {
         'stratiform_snowfall_flux': {'notes':
                                          'hourly mean - time index shifted from half past the hour to the following hour'},
     },
+    'chunks': chunks2d,
+}
+
+group2d_missing = {
+    'time': time2d,
+    'zarr_store': 'PT1H_2',
+    'name_map': name_map_2d_missing,
+    'constraint': has_dimensions("time", "latitude", "longitude"),
+    'extra_constraints': {},
+    'extra_processing': {
+        'm01s01i202': invert_cube_sign,
+        'surface_net_downward_longwave_flux': invert_cube_sign,
+    },
+    'extra_attrs': {},
+    'chunks': chunks2d,
+}
+
+group2d_sm = {
+    'time': timeP1D,
+    'zarr_store': 'P1D',
+    'name_map': {'moisture_content_of_soil_layer': ('soil_liquid_water_content', 'mrso')},
+    'constraint': has_dimensions("depth", "latitude", "longitude"),
+    'extra_constraints': {},
+    'extra_processing': {},
+    'extra_attrs': {},
+    'chunks': chunks2d,
+}
+
+group2d_strat_conf_pr = {
+    'time': time2d,
+    'zarr_store': 'PT1H',
+    'name_map': {'stratiform_rainfall_flux': ('stratiform_rainfall_flux', 'pr')},
+    'constraint': has_dimensions("time", "latitude", "longitude"),
+    'extra_constraints': {
+        'stratiform_rainfall_flux': iris.Constraint(name='stratiform_rainfall_flux') & iris.Constraint(
+            cube_func=cube_cell_method_is_not_empty),
+    },
+    'extra_processing': {},
+    'extra_attrs': {},
+    'chunks': chunks2d,
+}
+
+group2d_CoMA9_instantaenous = {
+    'time': time2d,
+    'zarr_store': 'PT1H',
+    'name_map': name_map_2d_CoMA9_instantaneous,
+    'constraint': has_dimensions("time", "latitude", "longitude"),
+    'extra_constraints': {
+        'precipitation_flux': iris.AttributeConstraint(STASH='m01s05i216') & iris.Constraint(cube_func=cube_cell_method_is_empty)
+    },
+    'extra_processing': {
+        'precipitation_flux': check_cube_time_length,
+    },
+    'extra_attrs': {},
     'chunks': chunks2d,
 }
 
@@ -258,26 +333,71 @@ global_sim_keys = {
 
 global_configs = {
     key: {
+        'name': key,
         'regional': False,
         'add_cyclic': True,
         'basedir': Path(f'/gws/nopw/j04/kscale/DYAMOND3_data/{simdir}/glm'),
         'donedir': Path(f'/gws/nopw/j04/hrcm/mmuetz/slurm_done/{deploy}'),
+        # TODO: proc_extra_vars: need new donefile.
         'donepath_tpl': f'{key}/{output_vn}/{{task}}_{{date}}.done',
+        # 'donepath_tpl': f'{key}/{output_vn}/{{task}}_{{date}}.GAL9_strat_conv.done',
         'first_date': pd.Timestamp(2020, 1, 20, 0),
         'max_zoom': 10 if key.startswith('glm.n2560') else 9,
         'zarr_store_url_tpl': f's3://sim-data/{deploy}/{output_vn}/{key}/um.{{freq}}.hp_z{{zoom}}.zarr',
         'drop_vars': drop_vars,
         'regrid_method': 'easygems_delaunay',
         'groups': {
+            # TODO: proc_extra_vars: select groups.
             '2d': group2d,
             '3d': group3d,
             '3d_ml': group3d_ml,
+            # '2d_missing': group2d_missing,
+            # '2d_CoMA9_inst': group2d_CoMA9_instantaenous,
         },
         'metadata': {
             'simulation': key,
         }
     }
     for key, simdir in global_sim_keys.items()
+}
+
+global_configs['glm.n2560_RAL3p3_SM'] = {
+    'regional': False,
+    'add_cyclic': True,
+    'basedir': Path(f'/gws/nopw/j04/kscale/DYAMOND3_data/5km-RAL3/glm'),
+    'donedir': Path(f'/gws/nopw/j04/hrcm/mmuetz/slurm_done/{deploy}'),
+    'donepath_tpl': f'glm.n2560_RAL3p3/{output_vn}/{{task}}_{{date}}.sm.done',
+    'first_date': pd.Timestamp(2020, 1, 20, 0),
+    'max_zoom': 10,
+    'zarr_store_url_tpl': f's3://sim-data/{deploy}/{output_vn}/glm.n2560_RAL3p3/um.{{freq}}.hp_z{{zoom}}.sm.zarr',
+    'drop_vars': drop_vars,
+    'regrid_method': 'easygems_delaunay',
+    'groups': {
+        '2d_sm': group2d_sm,
+    },
+    'metadata': {
+        'simulation': 'glm.n2560_RAL3p3',
+    }
+}
+
+global_configs['glm.n1280_GAL9_nest_strat_conv_pr'] = {
+    'name': 'glm.n1280_GAL9_nest',
+    'regional': False,
+    'add_cyclic': True,
+    'basedir': Path(f'/gws/nopw/j04/kscale/DYAMOND3_data/10km-CoMA9/glm'),
+    'donedir': Path(f'/gws/nopw/j04/hrcm/mmuetz/slurm_done/{deploy}'),
+    'donepath_tpl': f'glm.n1280_GAL9_nest/{output_vn}/{{task}}_{{date}}.strat_conv_pr2.done',
+    'first_date': pd.Timestamp(2020, 1, 20, 0),
+    'max_zoom': 9,
+    'zarr_store_url_tpl': f's3://sim-data/{deploy}/{output_vn}/glm.n1280_GAL9_nest/um.{{freq}}.hp_z{{zoom}}.zarr',
+    'drop_vars': drop_vars,
+    'regrid_method': 'easygems_delaunay',
+    'groups': {
+        '2d_strat_conv_pr': group2d_strat_conf_pr,
+    },
+    'metadata': {
+        'simulation': 'glm.n1280_GAL9_nest',
+    }
 }
 
 global_configs['glm.n2560_RAL3p3']['metadata'].update({

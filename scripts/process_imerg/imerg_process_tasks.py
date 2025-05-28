@@ -135,7 +135,7 @@ class ImergProcessTasks:
 
     def create_empty_zarr_stores(self, task):
         inpath = task['inpath']
-        zarr_time = pd.date_range(task['first_date'], pd.Timestamp(task['last_date']) + pd.Timedelta(hours=1), freq='30min')
+        zarr_time = pd.date_range(task['first_date'], pd.Timestamp(task['last_date']) + pd.Timedelta(hours=1), freq='1h')
 
         jasmin_s3 = s3fs.S3FileSystem(
             anon=False,
@@ -152,13 +152,14 @@ class ImergProcessTasks:
             'geospatial_lon_max': 360,
         }
 
-        ds = xr.open_dataset(inpath).pipe(fix_coords)
+        ds = xr.open_dataset(inpath).pipe(fix_coords).isel(time=slice(None, None, 2))
         for zoom in range(self.max_zoom + 1)[::-1]:
             chunks = chunks2d[zoom]
             # Multipls of 4**n chosen as these will align well with healpix grids.
             # Aim for 1-10MB per chunk, bearing in mind that this is saved with 4-byte float32s.
             logger.trace(f'chunks={chunks}')
-
+            # weights_path = Path('/gws/nopw/j04/hrcm/mmuetz/weights/') / weights_filename(da, zoom, lonname, latname,
+            #                                                                              add_cyclic, regional)
             ds_tpl = xr.Dataset()
             for name, da in ds.data_vars.items():
                 da_tpl = self.create_dataarray_template(da, chunks, zoom, zarr_time)
@@ -195,14 +196,13 @@ class ImergProcessTasks:
         lonname = 'lon'
         latname = 'lat'
 
-        if zoom == self.max_zoom:
-            weights_path = Path('/gws/nopw/j04/hrcm/mmuetz/weights/') / weights_filename(da, zoom, lonname, latname,
-                                                                                         True, True)
-            if not weights_path.exists():
-                logger.info(f'No weights for {da.name}, generating')
-                # chunks[-1] selects the spatial chunk.
-                gen_weights(da, zoom, lonname, latname, add_cyclic=True, regional=True,
-                            regional_chunks=chunks[-1], weights_path=weights_path)
+        weights_path = Path('/gws/nopw/j04/hrcm/mmuetz/weights/') / weights_filename(da, zoom, lonname, latname,
+                                                                                     True, True)
+        if not weights_path.exists():
+            logger.info(f'No weights for {da.name}, generating')
+            # chunks[-1] selects the spatial chunk.
+            gen_weights(da, zoom, lonname, latname, add_cyclic=True, regional=True,
+                        regional_chunks=chunks[-1], weights_path=weights_path)
 
         minlon, maxlon = da[lonname].values[[0, -1]]
         minlat, maxlat = da[latname].values[[0, -1]]
@@ -223,15 +223,16 @@ class ImergProcessTasks:
 
     def regrid(self, task):
         inpaths = task['inpaths']
-
-        chunks = chunks2d[self.max_zoom]
-
         logger.debug(f'Opening # paths: {len(inpaths)}')
-        ds = xr.open_mfdataset(inpaths).pipe(fix_coords)
+        ds = xr.open_mfdataset(inpaths).pipe(fix_coords).isel(time=slice(None, None, 2))
+
+        zoom = self.max_zoom
+        chunks = chunks2d[zoom]
+
         for name, da in ds.data_vars.items():
             logger.info(f'Regridding {name}')
-            da_hp = da_to_healpix(da, self.max_zoom, regional_chunks=chunks[-1])
-            da_to_zarr(da_hp, self.zarr_store_url_tpl, self.max_zoom)
+            da_hp = da_to_healpix(da, zoom, regional_chunks=chunks[-1])
+            da_to_zarr(da_hp, self.zarr_store_url_tpl, zoom)
 
     # def coarsen_healpix_region(self, task):
     #     dim = task['dim']
