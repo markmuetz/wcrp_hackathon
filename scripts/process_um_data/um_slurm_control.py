@@ -2,6 +2,7 @@ import math
 import sys
 import asyncio
 import json
+import random
 import subprocess as sp
 from collections import defaultdict
 from itertools import batched
@@ -11,10 +12,9 @@ import click
 import numpy as np
 import pandas as pd
 from loguru import logger
+import xarray as xr
 
-# from calc_completed_chunks import find_tgt_calcs, find_tgt_time_calcs
-from calc_completed_chunks import async_retry_open_zarr
-from processing_config import processing_config, output_vn
+from processing_config import processing_config
 
 SLURM_SCRIPT_ARRAY = """#!/bin/bash
 #SBATCH --job-name="{job_name}"
@@ -29,9 +29,11 @@ SLURM_SCRIPT_ARRAY = """#!/bin/bash
 #SBATCH -o slurm/output/{job_name}_{config_key}_{date_string}_%A_%a.out
 #SBATCH -e slurm/output/{job_name}_{config_key}_{date_string}_%A_%a.err
 #SBATCH --comment={comment}
-# These nodes repeatedly fail to be able to read the kscale GWS.
-#SBATCH --exclude=host1012,host1077,host1087,host1106,host1186,host1080,host1197,host1135,host1238,host1222,host1234
 {dependency}
+
+# These nodes repeatedly fail to be able to read the kscale GWS.
+# Apparently these have been fixed:
+# I used to have this --exclude=host1012,host1077,host1087,host1106,host1186,host1080,host1197,host1135,host1238,host1222,host1234
 
 # Quick check to see if it can access the kscale GWS.
 if ! ls /gws/nopw/j04/kscale > /dev/null 2>&1; then
@@ -43,6 +45,26 @@ ARRAY_INDEX=${{SLURM_ARRAY_TASK_ID}}
 
 python um_process_tasks.py slurm {tasks_path} ${{ARRAY_INDEX}}
 """
+
+
+async def async_retry_open_zarr(url, max_retries=20):
+    retries = 0
+    while retries < max_retries:
+        try:
+            ds = xr.open_zarr(url)
+            logger.debug(f'Successfully opened {url}')
+            return ds
+        except Exception as e:
+            # This has started (30/4/2025) raising exceptions
+            # It has previously been fine.
+            logger.warning(f'Failed to open {url}')
+            logger.warning(e)
+            retries += 1
+            # Sleep 10s, then 20s... with 5s jitter.
+            timeout = 1 * retries + random.uniform(-0.5, 0.5)
+            logger.warning(f'sleeping for {timeout} s')
+            await asyncio.sleep(timeout)
+    raise Exception(f'failed to open {url} after {retries} retries')
 
 
 def sysrun(cmd):
@@ -254,19 +276,6 @@ def process(ctx, config_key):
 @click.argument('config_key')
 @click.pass_context
 def coarsen(ctx, nbatch, endtime, config_key):
-    # This needs to be its own command. The reason is that I need to be able to examine a completed
-    # zarr store to be able to work out how to divvy up the work. This can only been done once the above have completed,
-    # and can't be calculated in advance. It would be possible to have a job whose sole purpose was to do this calc and
-    # then launch other jobs, but this seems overly complicated. Just wait until these have completed then launch.
-    # coarsen_task = {
-    #     'task_type': 'coarsen_healpix_region',
-    #     'config_key': config_key,
-    # }
-    # slurm_script_path = write_tasks_slurm_job_array(config_key, [coarsen_task], 'coarsen', nconcurrent_tasks=nconcurrent_tasks,
-    #                                                 depends_on=regrid_jobid)
-    # logger.debug(slurm_script_path)
-    # coarsen_jobid = sysrun(f'sbatch --parsable {slurm_script_path}').stdout.strip()
-    # jobids.append(coarsen_jobid)
     nconcurrent_tasks = ctx.obj['nconcurrent_tasks']
     config = processing_config[config_key]
     freqs = {
@@ -278,8 +287,8 @@ def coarsen(ctx, nbatch, endtime, config_key):
     dummy_donepath_tpl = config['donepath_tpl']
     dummy_donepath = dummy_donepath_tpl.format(task='dummy', date='dummy')
     donereldir = Path(dummy_donepath).parent
-    # TODO: changed for GAL9_strat_conv_pr.
     donepath_tpl = str(config['donedir'] / donereldir / 'coarsen/{dim}/z{zoom}/{job_id}.done')
+    # TODO: changed for GAL9_strat_conv_pr.
     # donepath_tpl = str(config['donedir'] / donereldir / 'coarsen/{dim}/z{zoom}/{job_id}.GAL9_strat_conv_pr.done')
 
     max_zoom = config['max_zoom']

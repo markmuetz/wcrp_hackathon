@@ -1,15 +1,10 @@
-import sys
 import asyncio
 import random
-from pathlib import Path
 
 import botocore.exceptions
 import numpy as np
-import s3fs
 import xarray as xr
 from loguru import logger
-
-from processing_config import processing_config
 
 
 def nan_weight(arr, axis):
@@ -80,7 +75,8 @@ def calc_tgt_weights(src_ds, src_ds_region, tgt_ds, tgt_zoom, dim):
     coords = {'cell': cells}
     # Use a global weights DataArray to convert between the src domain and the tgt domain.
     weights_global = xr.DataArray(np.full(12 * 4 ** tgt_zoom, np.nan, np.float32), dims=['cell'], coords=coords)
-    # TODO: I'm having difficulty figuring out how to use cells to map into weights_global
+    # I'm found it difficult to figure out how to use cells to map into weights_global
+    # But this works.
     tgt_cell_from_src = ((src_ds.cell.values.reshape(-1, 4).mean(axis=-1) - 1.5) / 4).astype(int)
     weights_global.loc[dict(cell=tgt_cell_from_src)] = weights.values
     tgt_weights = weights_global.isel(cell=tgt_ds.cell)
@@ -186,46 +182,3 @@ async def async_da_to_zarr_with_retries(da, store, region, max_retries=5):
             await asyncio.sleep(timeout)
     if not success:
         raise Exception(f'failed to write {da.name} to zarr store {store} after {retries} retries')
-
-
-def main():
-    s3cfg = dict([l.split(' = ') for l in Path('/home/users/mmuetz/.s3cfg').read_text().split('\n') if l])
-    sim = sys.argv[1]
-    dim = sys.argv[2]
-    zoom = int(sys.argv[3])
-    start_idx = int(sys.argv[4])
-    end_idx = int(sys.argv[5])
-    freqs = {
-        '2d': 'PT1H',
-        '3d': 'PT3H',
-    }
-    freq = freqs[dim]
-    urls = {
-        z: 'sim-data/dev/{sim}/v4/data.healpix.{freq}.z{zoom}.zarr'.format(sim=sim, freq=freq, zoom=z)
-        for z in range(11)
-    }
-
-    config = processing_config[sim]
-    chunks = config['groups'][dim]['chunks']
-
-    jasmin_s3 = s3fs.S3FileSystem(
-        anon=False, secret=s3cfg['secret_key'],
-        key=s3cfg['access_key'],
-        client_kwargs={'endpoint_url': 'http://hackathon-o.s3.jc.rl.ac.uk'}
-    )
-    src_store = s3fs.S3Map(root=urls[zoom], s3=jasmin_s3, check=False)
-    test_tgt_store = s3fs.S3Map(root=urls[zoom - 1], s3=jasmin_s3, check=False)
-
-    test_zarr_chunks = {'time': chunks[zoom - 1][0], 'cell': -1}
-    test_src_ds = xr.open_zarr(src_store, chunks=test_zarr_chunks)
-
-    # tgt_calcs = find_tgt_calcs(urls, chunks=chunks2d, dim='2d', variable='tas')
-    # tgt_time_calcs = find_tgt_time_calcs(tgt_calcs, chunks2d)
-    # start_idx = tgt_time_calcs[zoom - 1][0]['start_idx']
-    # end_idx = tgt_time_calcs[zoom - 1][0]['end_idx']
-    logger.debug((start_idx, end_idx))
-    coarsen_healpix_zarr_region(test_src_ds, test_tgt_store, zoom - 1, dim, start_idx, end_idx, chunks,
-                                regional=config['regional'])
-
-if __name__ == '__main__':
-    main()

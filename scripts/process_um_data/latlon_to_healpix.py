@@ -1,21 +1,16 @@
 """
-Contains a UMLatLon2HealpixRegridder class that lets you convert from UM lat/lon .pp to .nc
-Can be run as a command line script with args easy to see in main()
+Contains a LatLon2HealpixRegridder class that lets you convert from lat/lon to healpix
 """
-import sys
 from itertools import product
 from pathlib import Path
 
 import easygems.healpix as egh
 import easygems.remap as egr
 import healpix as hp
-import iris
 import numpy as np
 import xarray as xr
 from cartopy.util import add_cyclic_point
 from loguru import logger
-
-WEIGHTS_PATH = '/gws/nopw/j04/hrcm/mmuetz/weights/regrid_weights_N2560_hpz10.nc'
 
 
 def _xr_add_cyclic_point(da, lonname):
@@ -69,8 +64,8 @@ def get_regional_cell_idx(extent, zoom):
     return hp_lon, hp_lat, icell
 
 
-def gen_weights(da, zoom=10, lonname='longitude', latname='latitude', add_cyclic=True, weights_path=WEIGHTS_PATH,
-                regional=False, regional_chunks=None):
+def gen_weights(da, weights_path, zoom=10, lonname='longitude', latname='latitude', add_cyclic=True, regional=False,
+                regional_chunks=None):
     """Generate delaunay weights for regridding.
 
     Can use quite a lot of RAM: 30-40G for a UM N2560 conversion.
@@ -111,7 +106,6 @@ def gen_weights(da, zoom=10, lonname='longitude', latname='latitude', add_cyclic
         hp_lon = hp_lon[icell]
         hp_lat = hp_lat[icell]
     else:
-        # TODO: is this necessary for the UM?
         # This was in code that I copied the function from but I think I can leave it out.
         # hp_lon += 360 / (4 * nside) / 4  # shift quarter-width
         hp_lon = hp_lon % 360  # [0, 360)
@@ -127,17 +121,12 @@ def gen_weights(da, zoom=10, lonname='longitude', latname='latitude', add_cyclic
     logger.info(f'saved weights to {weights_path}')
 
 
-class UMLatLon2HealpixRegridder:
-    """Regrid UM lat/lon .pp files to healpix .nc"""
+class LatLon2HealpixRegridder:
+    """Regrid (UM) lat/lon .pp files to healpix .nc"""
 
-    def __init__(self, method='easygems_delaunay', zoom_level=10, add_cyclic=True, weights_path=WEIGHTS_PATH,
-                 regional=False, regional_chunks=None):
-        """Initate a UM regridder for a particular method/zoom levels.
-
-        Parameters:
-            method (str) : regridding method [easygems_delaunay, earth2grid].
-            zoom_level (int) : required healpix zoom level.
-            weights_path (pathlib.Path | str | None) : path to pre-computed weights (see gen_weights above).
+    def __init__(self, weights_path, method='easygems_delaunay', zoom_level=10, add_cyclic=True, regional=False,
+                 regional_chunks=None):
+        """Initate a regridder for a particular method/zoom levels.
         """
         if method not in ['easygems_delaunay', 'earth2grid']:
             raise ValueError('method must be either easygems_delaunay or earth2grid')
@@ -153,14 +142,6 @@ class UMLatLon2HealpixRegridder:
 
     def regrid(self, da, lonname, latname):
         """Do the regridding - set up common data to allow looping over all dims that are not lat/lon
-
-        Parameters:
-            da (xr.DataArray) : DataArray to be regridded
-            lonname (str): name of longitude coord.
-            latname (str): name of latitude coord.
-
-        Returns:
-            xr.DataArray : regridded data
         """
         if self.add_cyclic:
             da = _xr_add_cyclic_point(da, lonname)
@@ -248,17 +229,3 @@ class UMLatLon2HealpixRegridder:
             z_hpx = regrid(z_torch)
             # if idx == () this still works (i.e. does nothing to regridded_data).
             regridded_data[idx] = z_hpx.numpy()
-
-
-def main():
-    if len(sys.argv) == 2 and sys.argv[1] == 'gen_weights':
-        inpath = Path('/gws/nopw/j04/hrcm/cache/torau/Lorenzo_u-cu087/OLR/20200101T0000Z_pa000.pp')
-        cube = iris.load_cube(inpath)
-        da = xr.DataArray.from_iris(cube)
-
-        gen_weights(da, zoom=10)
-        return
-
-
-if __name__ == '__main__':
-    main()

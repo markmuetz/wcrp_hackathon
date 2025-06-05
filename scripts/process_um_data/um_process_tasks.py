@@ -1,7 +1,6 @@
 import asyncio
 import datetime as dt
 import json
-import random
 import sys
 from timeit import default_timer as timer
 from collections import defaultdict
@@ -9,7 +8,6 @@ from functools import partial
 from io import StringIO
 from pathlib import Path
 
-import botocore.exceptions
 import dask
 import dask.array
 from dask.distributed import LocalCluster
@@ -25,7 +23,7 @@ from loguru import logger
 
 from processing_config import processing_config, shared_metadata, cube_cell_method_is_not_empty
 from healpix_coarsen import coarsen_healpix_zarr_region, async_da_to_zarr_with_retries
-from um_latlon_pp_to_healpix_nc import UMLatLon2HealpixRegridder, gen_weights, get_limited_healpix
+from latlon_to_healpix import LatLon2HealpixRegridder, gen_weights, get_limited_healpix
 
 s3cfg = dict([l.split(' = ') for l in Path('/home/users/mmuetz/.s3cfg').read_text().split('\n') if l])
 iris.FUTURE.date_microseconds = True
@@ -40,6 +38,7 @@ def model_level_to_pressure(cube, p, z):
 
     # z = cubes.extract_cube('geopotential_height')
     # Direction of pressure_levels must match that of air_pressure/p.
+    # TODO: This runs, but it also inverts the 3D fields! Fix!!
     pressure_levels = z.coord('pressure').points[::-1] * 100  # convert from hPa to Pa.
     interpolator = partial(stratify.interpolate,
                            interpolation=stratify.INTERPOLATE_LINEAR,
@@ -141,15 +140,15 @@ def da_to_healpix(da, zoom, regrid_method, name_map, drop_vars, add_cyclic=True,
     lonname = [c for c in da.coords if c.startswith('longitude')][0]
     latname = [c for c in da.coords if c.startswith('latitude')][0]
     if regrid_method == 'easygems_delaunay':
+        # TODO: hardcoded path
         weights_path = Path('/gws/nopw/j04/hrcm/mmuetz/weights/') / weights_filename(da, zoom, lonname, latname,
                                                                                      add_cyclic, regional)
         logger.trace(f'  - using weights: {weights_path}')
-        regridder = UMLatLon2HealpixRegridder(method='easygems_delaunay', zoom_level=zoom, weights_path=weights_path,
-                                              add_cyclic=add_cyclic, regional=regional, regional_chunks=regional_chunks)
+        regridder = LatLon2HealpixRegridder(weights_path=weights_path, method='easygems_delaunay', zoom_level=zoom,
+                                            add_cyclic=add_cyclic, regional=regional, regional_chunks=regional_chunks)
     else:
-        regridder = UMLatLon2HealpixRegridder(method=regrid_method, zoom_level=zoom, weights_path=None,
-                                              add_cyclic=add_cyclic,
-                                              regional=regional, regional_chunks=regional_chunks)
+        regridder = LatLon2HealpixRegridder(weights_path=None, method=regrid_method, zoom_level=zoom,
+                                            add_cyclic=add_cyclic, regional=regional, regional_chunks=regional_chunks)
 
     # These have to be dropped before you cyclic pad *some* data arrays, or you will get a coord mismatch.
     drop_vars_exists = list(set(drop_vars) & set(k for k in da.coords.keys()))
@@ -324,13 +323,14 @@ class UMProcessTasks:
 
         logger.trace((zoom, self.config['max_zoom']))
         if zoom == self.config['max_zoom']:
+            # TODO: hardcoded path
             weights_path = Path('/gws/nopw/j04/hrcm/mmuetz/weights/') / weights_filename(da, zoom, lonname, latname,
                                                                                          add_cyclic, regional)
             if not weights_path.exists():
                 logger.info(f'No weights for {da.name}, generating')
                 # chunks[-1] selects the spatial chunk.
-                gen_weights(da, zoom, lonname, latname, add_cyclic=add_cyclic, regional=regional,
-                            regional_chunks=chunks[-1], weights_path=weights_path)
+                gen_weights(da, weights_path=weights_path, zoom=zoom, lonname=lonname, latname=latname,
+                            add_cyclic=add_cyclic, regional=regional, regional_chunks=chunks[-1])
         if regional:
             minlon, maxlon = da[lonname].values[[0, -1]]
             minlat, maxlat = da[latname].values[[0, -1]]
@@ -391,6 +391,7 @@ class UMProcessTasks:
                 logger.info(f'Regridding {name}')
                 constraint = group['extra_constraints'].get(name, name)
                 try:
+                    # TODO: try to handle in config rather than with logic.
                     if self.config.get('name', '').startswith('glm.n1280_GAL9_nest') and name == 'stratiform_rainfall_flux':
                         cube = group_cubes.extract_cube(constraint)
                         constraint2 = (iris.Constraint(name='convective_rainfall_flux') & iris.Constraint(
@@ -446,11 +447,8 @@ class UMProcessTasks:
         chunks = self.config['groups'][dim]['chunks']
         zarr_chunks = {'time': chunks[tgt_zoom][0], 'cell': -1}
         src_ds = xr.open_zarr(src_store, chunks=zarr_chunks)
-        # TODO: DO NOT LEAVE IN!!!
-        # src_ds = src_ds[['pr']]
         regional = self.config['regional']
 
-        # TODO:
         cluster = LocalCluster()  # Fully-featured local Dask cluster
         client = cluster.get_client()
         logger.debug(cluster)
@@ -508,12 +506,13 @@ def add_orog_land_sea(config_key):
     land = xr.DataArray.from_iris(cubes.extract_cube('land_binary_mask'))
     orog = xr.DataArray.from_iris(cubes.extract_cube('surface_altitude'))
 
+    # TODO: hardcoded path
     weights_path = (Path('/gws/nopw/j04/hrcm/mmuetz/weights/') /
                     weights_filename(land, config['max_zoom'], 'longitude',
                                      'latitude', add_cyclic, regional))
     assert weights_path.exists(), f'{weights_path} does not exist'
-    regridder = UMLatLon2HealpixRegridder(zoom_level=max_zoom, weights_path=weights_path, add_cyclic=add_cyclic,
-                                          regional=regional)
+    regridder = LatLon2HealpixRegridder(weights_path=weights_path, zoom_level=max_zoom, add_cyclic=add_cyclic,
+                                        regional=regional)
     hpland = regridder.regrid(land, 'longitude', 'latitude')
     hporog = regridder.regrid(orog, 'longitude', 'latitude')
     hpland.attrs['long_name'] = 'land_area_fraction'
@@ -549,6 +548,7 @@ def add_orog_land_sea(config_key):
             root=store_url,
             s3=jasmin_s3, check=False)
 
+        # TODO: add to existing zarr stores!
         ds_static = xr.Dataset()
         ds_static['orog'] = hporog.copy().assign_coords(crs=crs)
         ds_static['sftlf'] = hpland.copy().assign_coords(crs=crs)

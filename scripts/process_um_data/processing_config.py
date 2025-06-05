@@ -73,10 +73,6 @@ name_map_2d_missing = {
     'surface_net_downward_longwave_flux': ('surface_upwelling_longwave_flux_in_air', 'rlus'),
 }
 
-name_map_2d_CoMA9_instantaneous = {
-    'precipitation_flux': ('precipitation_flux', 'pr'),
-}
-
 name_map_3d = {
     'x_wind': ('eastward_wind', 'ua'),
     'geopotential_height': ('geopotential height', 'zg'),
@@ -165,6 +161,7 @@ chunks3dregional = {
 #     0: (4 ** 6, 25, 12 * 4 ** 0),
 # }
 
+# UM vars in the original .pp files/iris cubes that are not needed.
 drop_vars = [
     'latitude_0',
     'longitude_0',
@@ -204,7 +201,6 @@ def check_cube_time_length(cube):
     return cube
 
 
-# CoMA9 use instantaneous values total precip flux: 5, 216.
 group2d = {
     'time': time2d,
     'zarr_store': 'PT1H',
@@ -232,6 +228,7 @@ group2d = {
     'chunks': chunks2d,
 }
 
+# TODO: integrate with existing 2D.
 group2d_missing = {
     'time': time2d,
     'zarr_store': 'PT1H_2',
@@ -246,6 +243,7 @@ group2d_missing = {
     'chunks': chunks2d,
 }
 
+# TODO: Not working! Problem with time dimension only having 1 value per day.
 group2d_sm = {
     'time': timeP1D,
     'zarr_store': 'P1D',
@@ -271,10 +269,13 @@ group2d_strat_conf_pr = {
     'chunks': chunks2d,
 }
 
+# CoMA9 use instantaneous values total precip flux: 5, 216.
 group2d_CoMA9_instantaenous = {
     'time': time2d,
     'zarr_store': 'PT1H',
-    'name_map': name_map_2d_CoMA9_instantaneous,
+    'name_map': {
+        'precipitation_flux': ('precipitation_flux', 'pr'),
+    },
     'constraint': has_dimensions("time", "latitude", "longitude"),
     'extra_constraints': {
         'precipitation_flux': iris.AttributeConstraint(STASH='m01s05i216') & iris.Constraint(cube_func=cube_cell_method_is_empty)
