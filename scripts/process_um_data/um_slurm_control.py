@@ -1,26 +1,29 @@
+"""Entry point into submitting SLURM jobs.
+
+* Works by scanning input directories, then builds a list of jobs based on whether each job has already been done yet.
+* Uses click to build a nice CLI.
+"""
 import math
 import sys
-import asyncio
 import json
-import random
 import subprocess as sp
 from collections import defaultdict
 from itertools import batched
 from pathlib import Path
 
 import click
-import numpy as np
 import pandas as pd
 from loguru import logger
-import xarray as xr
 
-from processing_config import processing_config
+from um_processing_config import slurm_config, processing_config, time2d, time3d
+from util import sysrun
 
+# SLURB script template - filled in and written to a file for calling with `sbatch`.
 SLURM_SCRIPT_ARRAY = """#!/bin/bash
 #SBATCH --job-name="{job_name}"
 #SBATCH --time=10:00:00
 #SBATCH --mem={mem}
-#SBATCH --account=hrcm
+#SBATCH --account={account}
 #SBATCH --ntasks={ntasks}
 #SBATCH --cpus-per-task={cpus_per_task}
 #SBATCH --partition={partition}
@@ -33,7 +36,7 @@ SLURM_SCRIPT_ARRAY = """#!/bin/bash
 
 # These nodes repeatedly fail to be able to read the kscale GWS.
 # Apparently these have been fixed:
-# I used to have this --exclude=host1012,host1077,host1087,host1106,host1186,host1080,host1197,host1135,host1238,host1222,host1234
+# I used to have this #SBATCH --exclude=host1012,host1077,host1087,host1106,host1186,host1080,host1197,host1135,host1238,host1222,host1234
 
 # Quick check to see if it can access the kscale GWS.
 if ! ls /gws/nopw/j04/kscale > /dev/null 2>&1; then
@@ -46,32 +49,8 @@ ARRAY_INDEX=${{SLURM_ARRAY_TASK_ID}}
 python um_process_tasks.py slurm {tasks_path} ${{ARRAY_INDEX}}
 """
 
-
-async def async_retry_open_zarr(url, max_retries=20):
-    retries = 0
-    while retries < max_retries:
-        try:
-            ds = xr.open_zarr(url)
-            logger.debug(f'Successfully opened {url}')
-            return ds
-        except Exception as e:
-            # This has started (30/4/2025) raising exceptions
-            # It has previously been fine.
-            logger.warning(f'Failed to open {url}')
-            logger.warning(e)
-            retries += 1
-            # Sleep 10s, then 20s... with 5s jitter.
-            timeout = 1 * retries + random.uniform(-0.5, 0.5)
-            logger.warning(f'sleeping for {timeout} s')
-            await asyncio.sleep(timeout)
-    raise Exception(f'failed to open {url} after {retries} retries')
-
-
-def sysrun(cmd):
-    return sp.run(cmd, check=True, shell=True, stdout=sp.PIPE, stderr=sp.PIPE, encoding='utf8')
-
-
 def sbatch(slurm_script_path):
+    """Submit script using sbatch."""
     try:
         return sysrun(f'sbatch --parsable {slurm_script_path}').stdout.strip()
     except sp.CalledProcessError as e:
@@ -80,12 +59,13 @@ def sbatch(slurm_script_path):
         raise
 
 
-def parse_date_from_pp_path(path):
+def _parse_date_from_pp_path(path):
     datestr = path.stem.split('.')[-1].split('_')[1]
     return pd.to_datetime(datestr, format="%Y%m%dT%H")
 
 
 def write_tasks_slurm_job_array(config_key, tasks, job_name, depends_on=None, **kwargs):
+    """Write out a script for submission."""
     now = pd.Timestamp.now()
     date_string = now.strftime("%Y%m%d_%H%M%S")
 
@@ -105,15 +85,7 @@ def write_tasks_slurm_job_array(config_key, tasks, job_name, depends_on=None, **
 
     slurm_script_path = Path(f'slurm/scripts/script_{job_name}_{config_key}_{date_string}.sh')
     njobs = len(tasks) - 1
-    slurm_kwargs = dict(
-        ntasks=1,
-        cpus_per_task=1,
-        partition='standard',
-        qos='standard',
-        mem=100000,
-        nconcurrent_tasks=40,
-    )
-    slurm_kwargs.update(kwargs)
+    slurm_kwargs = {**slurm_config, **kwargs}
     script_kwargs = dict(
         job_name=job_name,
         config_key=config_key,
@@ -130,7 +102,7 @@ def write_tasks_slurm_job_array(config_key, tasks, job_name, depends_on=None, **
 
 
 def find_dyamond3_pp_dates_to_paths(basedir):
-    # Search for pp_paths with a specific date (N.B. filename sensitive).
+    """Search for pp_paths with a specific date (N.B. filename sensitive)."""
     pp_paths = sorted(basedir.glob('field.pp/apve*/**/*.pp'))
     logger.debug(f'found {len(pp_paths)} pp paths')
     pp_paths = [p for p in pp_paths if p.is_file()]
@@ -140,7 +112,7 @@ def find_dyamond3_pp_dates_to_paths(basedir):
         # Not sure what's in them either.
         if 'apvere' in path.stem:
             continue
-        dates_to_paths[parse_date_from_pp_path(path)].append(path)
+        dates_to_paths[_parse_date_from_pp_path(path)].append(path)
     # Only keep completed downloads.
     dates_to_paths = {
         k: v for k, v in dates_to_paths.items()
@@ -186,6 +158,14 @@ def cli(ctx, dry_run, debug, trace, nconcurrent_tasks):
             path.mkdir(parents=True, exist_ok=True)
 
 
+@cli.result_callback()
+@click.pass_context
+def cli_exit(ctx, result, **kwargs):
+    # This runs after any subcommand completes
+    if ctx.obj['dry_run']:
+        logger.warning("Dry run: not launching any jobs")
+
+
 @cli.command()
 @click.argument('config_key')
 @click.pass_context
@@ -211,13 +191,14 @@ def process(ctx, config_key):
     # Build a list of tasks for all donepaths that don't exist.
     tasks = []
     for date in dates_to_paths:
-        # if not (date.year == 2020 and date.month == 1):
-        #     continue
-        # TODO!! don't leave in.
-        if date == config['first_date'] and False:
+        # TODO:!!
+        if date > pd.Timestamp('2020-02-01 00:00'):
+            break
+        if date == config['first_date']:
             create_donepath = donedir / donepath_tpl.format(task='create_empty_zarr_store', date=date)
             logger.debug(create_donepath)
             if not create_donepath.exists():
+                # Create a task to create empty zarr stores on first date and if not already completed.
                 logger.info('Creating zarr store')
                 create_task = {
                     'task_type': 'create_empty_zarr_stores',
@@ -240,6 +221,7 @@ def process(ctx, config_key):
         if donepath.exists():
             logger.debug(f'{date}: already processed')
         else:
+            # Create regrid task for a given date.
             logger.info(f'{date}: processing')
             tasks.append(
                 {
@@ -253,8 +235,8 @@ def process(ctx, config_key):
 
     regrid_jobid = None
     if len(tasks):
+        # Run tasks.
         logger.info(f'Running {len(tasks)} tasks')
-        # TODO: proc_extra_vars: reduce mem. (16000 is fine)
         slurm_script_path = write_tasks_slurm_job_array(config_key, tasks, 'regrid',
                                                         nconcurrent_tasks=nconcurrent_tasks,
                                                         depends_on=create_jobid)
@@ -278,30 +260,23 @@ def process(ctx, config_key):
 def coarsen(ctx, nbatch, endtime, config_key):
     nconcurrent_tasks = ctx.obj['nconcurrent_tasks']
     config = processing_config[config_key]
-    freqs = {
-        '2d': 'PT1H',
-        '3d': 'PT3H',
-    }
-    # Last variables for each.
     jobids = []
     dummy_donepath_tpl = config['donepath_tpl']
     dummy_donepath = dummy_donepath_tpl.format(task='dummy', date='dummy')
     donereldir = Path(dummy_donepath).parent
     donepath_tpl = str(config['donedir'] / donereldir / 'coarsen/{dim}/z{zoom}/{job_id}.done')
-    # TODO: changed for GAL9_strat_conv_pr.
-    # donepath_tpl = str(config['donedir'] / donereldir / 'coarsen/{dim}/z{zoom}/{job_id}.GAL9_strat_conv_pr.done')
-
     max_zoom = config['max_zoom']
 
     for dim in ['2d', '3d']:
         prev_zoom_job_id = None
-
-        rel_url_tpl = config['zarr_store_url_tpl'][5:]  # chop off 's3://'
-        rel_url = rel_url_tpl.format(freq=freqs[dim], zoom=max_zoom)
-        src_ds = asyncio.run(async_retry_open_zarr('http://hackathon-o.s3.jc.rl.ac.uk/' + rel_url))
+        if dim == '2d':
+            time_idx = time2d
+        elif dim == '3d':
+            time_idx = time3d
+        else:
+            raise Exception(f'unknown dim: {dim}')
         if endtime is not None:
-            src_ds = src_ds.sel(time=slice(endtime))
-        time_idx = np.arange(len(src_ds.time))
+            time_idx = time_idx[time_idx <= endtime]
 
         chunks = config['groups'][dim]['chunks']
 
@@ -338,7 +313,6 @@ def coarsen(ctx, nbatch, endtime, config_key):
                 if dim == '3d':
                     mem = 256000
                 else:
-                    # TODO
                     mem = 100000
                 # The heart of this method is a ds.coarsen(cell=4).mean() call.
                 # This benefits massively from a dask speed up.
@@ -350,8 +324,6 @@ def coarsen(ctx, nbatch, endtime, config_key):
                     nconcurrent_tasks=nconcurrent_tasks,
                     mem=mem,
                     qos='high',
-                    # I think you have to use 48 (instead of 12 - only two checked) because
-                    # otherwise you get multiple dask LocalClusters starting on same node.
                     # cpus_per_task=48,  # maxes out at 6 tasks/288 cpus because of max cpus.
                     cpus_per_task=12,  # maxes out at 24 tasks/288 cpus because of max cpus.
                 )

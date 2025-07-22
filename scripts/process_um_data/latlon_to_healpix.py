@@ -1,5 +1,4 @@
-"""
-Contains a LatLon2HealpixRegridder class that lets you convert from lat/lon to healpix
+"""Contains a LatLon2HealpixRegridder class that lets you convert from lat/lon to healpix
 """
 from itertools import product
 from pathlib import Path

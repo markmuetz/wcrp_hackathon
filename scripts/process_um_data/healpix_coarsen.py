@@ -1,10 +1,13 @@
+"""Includes all the code for coarsening from one healpix level to the next lower."""
 import asyncio
-import random
 
-import botocore.exceptions
 import numpy as np
 import xarray as xr
 from loguru import logger
+
+from util import async_da_to_zarr_with_retries
+
+# TODO: docstrings.
 
 
 def nan_weight(arr, axis):
@@ -64,7 +67,7 @@ def map_global_to_regional(_da, src_ds_region, tgt_ds_store, dim):
     return da_new
 
 
-def calc_tgt_weights(src_ds, src_ds_region, tgt_ds, tgt_zoom, dim):
+def calc_tgt_weights(src_ds, tgt_ds, tgt_zoom, dim):
     # It is enough to calc the weights for one field, and store.
     if dim == '2d':
         src_da = list(src_ds.data_vars.values())[0].isel(time=0)
@@ -119,8 +122,7 @@ def coarsen_healpix_zarr_region(src_ds, tgt_store, tgt_zoom, dim, start_idx, end
         tgt_ds_store = xr.open_zarr(tgt_store, chunks=zarr_chunks)
         tgt_ds = tgt_ds.map(map_global_to_regional, src_ds_region=src_ds_region, tgt_ds_store=tgt_ds_store, dim=dim)
         if (src_ds_region.time[0] == src_ds.time[0]) and 'weights' not in src_ds.data_vars:
-            tgt_weights = calc_tgt_weights(src_ds, src_ds_region, tgt_ds, tgt_zoom, dim)
-            # TODO: Need to create weights in empty zarr store for this to work.
+            tgt_weights = calc_tgt_weights(src_ds, tgt_ds, tgt_zoom, dim)
             tgt_ds['weights'] = tgt_weights
             logger.debug(float(np.isnan(tgt_ds.weights).sum().values))
 
@@ -155,30 +157,3 @@ def coarsen_healpix_zarr_region(src_ds, tgt_store, tgt_zoom, dim, start_idx, end
             continue
         asyncio.run(
             async_da_to_zarr_with_retries(da.chunk({'cell': preferred_chunks['cell']}), tgt_store, region))
-
-
-async def async_da_to_zarr_with_retries(da, store, region, max_retries=5):
-    # This got complicated quite quickly. I was getting exceptions intermittently with da.to_zarr. Handling these
-    # exceptions wasn't working because it was being thrown from async code, so I needed to write my own async func
-    # so I could call await asyncio.sleep(...). This is how you call it. ChatGPT helped with the async stuff.
-    retries = 0
-    success = False
-    while retries < max_retries:
-        try:
-            da.to_zarr(store, region=region)
-            success = True
-            logger.debug(f'{da.name} successfully written to zarr')
-            break
-        except (botocore.exceptions.ClientError, OSError, PermissionError, FileNotFoundError) as e:
-            # This has started (26/4/2025) raising exceptions, one as an inner, one as outer.
-            # Not sure which exception is responsible/the one to catch.
-            # It has previously been fine.
-            logger.warning(f'Failed to write {da.name} to zarr store {store}')
-            logger.warning(e)
-            retries += 1
-            # Sleep 10s, then 20s... with 5s jitter.
-            timeout = 10 * retries + random.uniform(-5, 5)
-            logger.debug(f'sleeping for {timeout} s')
-            await asyncio.sleep(timeout)
-    if not success:
-        raise Exception(f'failed to write {da.name} to zarr store {store} after {retries} retries')
