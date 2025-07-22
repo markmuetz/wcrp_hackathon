@@ -11,7 +11,7 @@ import pandas as pd
 
 from cube_to_da_mapping import MapItem, MultiMapItem
 
-output_vn = 'v5.2'
+output_vn = 'v5.3'
 deploy = 'dev'
 
 # Defaults - can be overridden.
@@ -103,8 +103,8 @@ name_map_2d = {
         name='toa_outgoing_shortwave_flux') & iris.AttributeConstraint(
         STASH='m01s01i208')),
     ('rsutcs', 'toa_outgoing_shortwave_flux_clear_sky'): MapItem('toa_outgoing_shortwave_flux_assuming_clear_sky'),
-    ('rsus', 'surface_upwelling_shortwave_flux_in_air'): MapItem('m01s01i202', extra_processing=invert_cube_sign()),
-    ('rlus', 'surface_upwelling_longwave_flux_in_air'): MapItem('surface_net_downward_longwave_flux', extra_processing=invert_cube_sign()),
+    ('rsus', 'surface_upwelling_shortwave_flux_in_air'): MapItem('m01s01i202', extra_processing=invert_cube_sign),
+    ('rlus', 'surface_upwelling_longwave_flux_in_air'): MapItem('surface_net_downward_longwave_flux', extra_processing=invert_cube_sign),
 }
 
 name_map_3d = {

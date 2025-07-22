@@ -216,7 +216,7 @@ class UMProcessTasks:
         extractor = DataArrayExtractor(None, None)
         for key, map_item in name_map.items():
             short_name, long_name = key
-            cube = extractor.extract_cube(group_cubes, map_item, combine_cubes=False)
+            cube = extractor.extract_cube(map_item, group_cubes, combine_cubes=False)
             da = xr.DataArray.from_iris(cube).rename(short_name)
             da.attrs['long_name'] = long_name
             list_da.append(da)
@@ -430,7 +430,7 @@ class UMProcessTasks:
         # These are needed by any field which needs 3D interp.
         p = cubes.extract_cube('air_pressure')
         z = cubes.extract_cube('geopotential_height')
-        da_extractor = DataArrayExtractor(p, z)
+        extractor = DataArrayExtractor(p, z)
 
         for group_name, group in self.groups.items():
             logger.info(f'processing group {group_name}')
@@ -441,11 +441,15 @@ class UMProcessTasks:
 
             # Handle each entry in the mapping from UM cubes to dataarrays.
             # There might be multiple cubes required for a single dataarray due to the need to e.g. combine snow/rain.
-            # da_extractor will handle these.
-            for key in name_map:
+            # extractor will handle these.
+            for i, key in enumerate(name_map):
                 short_name, long_name = key
+                msg = f'{(i + 1)}/{len(name_map)}: regridding {short_name}'
+                logger.info('=' * len(msg))
+                logger.info(msg)
+                logger.info('=' * len(msg))
                 map_item = name_map[key]
-                da = da_extractor.extract_da(map_item, group_cubes)
+                da = extractor.extract_da(map_item, group_cubes)
 
                 zoom = self.config['max_zoom']
                 # Do the regridding.
