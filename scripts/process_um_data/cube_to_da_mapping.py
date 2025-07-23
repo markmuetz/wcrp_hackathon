@@ -57,6 +57,10 @@ class MultiMapItem:
         self.extra_processing = extra_processing
         self.extra_attrs = extra_attrs if extra_attrs is not None else {}
 
+    def __repr__(self):
+        return 'MutliMapItem(' + str(self.items) + ', ' + str(self.ops) + ')'
+
+
 
 class MapItem:
     """Contains iris constraints to extract a given cube, along with extra_processing."""
@@ -65,4 +69,5 @@ class MapItem:
         self.extra_processing = extra_processing
         self.extra_attrs = extra_attrs if extra_attrs is not None else {}
 
-
+    def __repr__(self):
+        return f'MapItem({self.iris_constraint})'
