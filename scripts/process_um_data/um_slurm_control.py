@@ -15,6 +15,7 @@ import click
 import pandas as pd
 from loguru import logger
 
+from cube_to_da_mapping import DataArrayExtractor
 from um_processing_config import slurm_config, processing_config, time2d, time3d
 from util import sysrun
 
@@ -343,6 +344,85 @@ def coarsen(ctx, nbatch, endtime, config_key):
 def ls(ctx):
     for key in processing_config:
         print(key)
+
+
+@cli.command()
+@click.argument('config_key')
+@click.option('--date', '-d', default=None)
+@click.option('--output-file', '-o', default=None)
+@click.pass_context
+def check_output_mapping(ctx, config_key, date, output_file):
+    import iris
+    import operator
+
+    operator_symbol_map = {
+        operator.add: '+',
+        operator.sub: '-',
+        operator.mul: '*',
+        operator.truediv: '/',
+    }
+    if config_key == 'all':
+        config_keys = list(processing_config)
+    else:
+        config_keys = [config_key]
+
+    cols = ['expt', 'store', 'short_name', 'long_name', 'present', 'cube_name', 'stash_code']
+    data = []
+    for config_key in config_keys:
+        # TODO: can't load data for Africa or SEA CTC??
+        if 'Africa' in config_key or 'SEA' in config_key or 'CTC_km4p4_CoMA9' in config_key:
+            continue
+        logger.info(f'processing {config_key}')
+        config = processing_config[config_key]
+        if date is None:
+            date = config['first_date']
+
+        basedir = config['basedir']
+        dates_to_paths = find_dyamond3_pp_dates_to_paths(basedir)
+        inpaths = dates_to_paths[date]
+        cubes = iris.load(inpaths)
+
+        extractor = DataArrayExtractor(None, None)
+        for group_name, group in config['groups'].items():
+            logger.info(group_name)
+
+            group_constraint = group['constraint']
+            name_map = group['name_map']
+            store = group['zarr_store']
+
+            group_cubes = cubes.extract(group_constraint)
+            for key, map_item in name_map.items():
+                logger.debug(f'  {key}: {map_item}')
+                short_name, long_name = key
+                try:
+                    item_cubes = extractor.extract_cubes(map_item, group_cubes)
+                    if len(item_cubes) == 1:
+                        cube = item_cubes[0]
+                        cubestr = cube.name()
+                        stashstr = cube.attributes['STASH']
+                    else:
+                        cube = item_cubes[0]
+                        ops = map_item.ops
+                        cube_list = [cube.name()]
+                        stash_list = [str(cube.attributes['STASH'])]
+                        for op, next_cube in zip(ops, item_cubes[1:]):
+                            cube_list.extend([operator_symbol_map[op], next_cube.name()])
+                            stash_list.extend([operator_symbol_map[op], str(next_cube.attributes['STASH'])])
+                        cubestr = ' '.join(cube_list)
+                        stashstr = ' '.join(stash_list)
+                    data.append(
+                        str(v) for v in [config_key, store, short_name, long_name, True, cubestr, stashstr, map_item.extra_attrs]
+                    )
+                except iris.exceptions.ConstraintMismatchError as cme:
+                    data.append(
+                        str(v) for v in [config_key, store, short_name, long_name, False, None, None, map_item.extra_attrs]
+                    )
+
+    df = pd.DataFrame(data, columns=cols)
+    if output_file is not None:
+        df.to_csv(output_file, index=False)
+    else:
+        print(df)
 
 
 if __name__ == '__main__':
