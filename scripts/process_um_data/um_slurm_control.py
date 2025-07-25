@@ -366,7 +366,7 @@ def check_output_mapping(ctx, config_key, date, output_file):
     else:
         config_keys = [config_key]
 
-    cols = ['expt', 'store', 'short_name', 'long_name', 'present', 'cube_name', 'stash_code']
+    cols = ['expt', 'store', 'short_name', 'long_name', 'present', 'cube_name', 'stash_code', 'extra_attrs']
     data = []
     for config_key in config_keys:
         # TODO: can't load data for Africa or SEA CTC??
@@ -424,6 +424,41 @@ def check_output_mapping(ctx, config_key, date, output_file):
     else:
         print(df)
 
+
+def title(msg):
+    print(msg)
+    print('=' * len(msg))
+
+@cli.command()
+@click.option('--input-file', '-i')
+@click.pass_context
+def analyse_output_mapping(ctx, input_file):
+    df = pd.read_csv(input_file)
+
+    N = len(df.expt.unique())
+    comparison_cols = df.drop(columns='expt')
+    # Get a df with the number of times each row (ignoring 'expt') is duplicated and combine with existing df.
+    duplicate_counts = comparison_cols.groupby(comparison_cols.columns.tolist()).size()
+    df_with_counts = df.merge(
+        duplicate_counts.rename("counts"),
+        how='left',
+        left_on=comparison_cols.columns.tolist(),
+        right_index=True
+    )
+
+    # Find the first set of non-duplicated rows for any row which appears as many times as there are expts.
+    # i.e. each row is the same across all expts.
+    title('The same across all expts:')
+    print(df[df_with_counts.counts == N][
+              ~df_with_counts[df_with_counts.counts == N].drop(columns='expt').duplicated()].drop(columns='expt'))
+
+    # Find any short_name that is different across *any* expt, or is not present in any expt.
+    interesting_inputs = set()
+    interesting_inputs.update(df_with_counts[df_with_counts.counts < N]['short_name'].unique().tolist())
+    interesting_inputs.update(df_with_counts[df_with_counts.present == False]['short_name'].unique().tolist())
+    for var in interesting_inputs:
+        title(f'Interesting var: {var}')
+        print(df[df.short_name == var])
 
 if __name__ == '__main__':
     cli(obj={})
