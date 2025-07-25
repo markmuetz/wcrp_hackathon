@@ -130,6 +130,9 @@ def healpix_da_to_zarr(da, url, group_name, group_time, regional, nan_checks=Fal
         if not regional and np.isnan(da.values).any():
             logger.warning(f'da {da.name} contains NaNs')
 
+    zarr_store = s3fs.S3Map(
+        root=url,
+        s3=get_jasmin_s3(), check=False)
     # Handle errors if they arise (started happening on 26/4/25).
     asyncio.run(async_da_to_zarr_with_retries(da, zarr_store, region))
     return name
