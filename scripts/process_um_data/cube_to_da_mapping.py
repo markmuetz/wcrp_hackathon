@@ -12,28 +12,35 @@ class DataArrayExtractor:
         self.z = z
 
     @staticmethod
-    def extract_cube(map_item, group_cubes, combine_cubes=True):
+    def extract_cubes(map_item, group_cubes):
         """Extract an individual cube from a set of input cubes, possibly combining multiple cubes.
 
         Uses the constraints in map_item to extract the desired cube."""
         # Extract the cube and combine if necessary.
         if isinstance(map_item, MapItem):
             cube = group_cubes.extract_cube(map_item.iris_constraint)
+            return [cube]
         elif isinstance(map_item, MultiMapItem):
             constraint_cubes = [group_cubes.extract_cube(map_item.iris_constraint) for map_item in map_item.items]
-            cube = constraint_cubes[0]
-            if combine_cubes:
-                for next_cube, op in zip(constraint_cubes[1:], map_item.ops):
-                    cube.data = op(cube.data, next_cube.data)
+            return constraint_cubes
         else:
             raise Exception(f'unknown type {type(map_item)}')
-
-        return cube
 
     def extract_da(self, map_item, group_cubes):
         """Extracts a DataArray from a map item and group of cubes, applying optional extra processing if specified.
         """
-        cube = self.extract_cube(map_item, group_cubes)
+        # *Always* shorten cubes of time 13 to length 12 by ignoring first value.
+        # This applies to the first cube of each day, for certain fields.
+        cubes = self.extract_cubes(map_item, group_cubes)
+        for i in range(len(cubes)):
+            cube = cubes[i]
+            if cube.shape[0] == 13:
+                cubes[i] = cube[1:]
+
+        cube = cubes[0]
+        if isinstance(map_item, MultiMapItem) and len(cubes) > 1:
+            for next_cube, op in zip(cubes[1:], map_item.ops):
+                cube.data = op(cube.data, next_cube.data)
         if map_item.extra_processing is not None:
             if map_item.extra_processing == 'interpolate_model_levels_to_pressure':
                 # Not so easy to add this as an extra processing step because it needs p and z.

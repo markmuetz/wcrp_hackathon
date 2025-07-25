@@ -90,19 +90,12 @@ def regrid_da_to_healpix(da, zoom, short_name, long_name, weightsdir, drop_vars,
     return da_hp
 
 
-def healpix_da_to_zarr(da, url, group_name, regional, nan_checks=False):
+def healpix_da_to_zarr(da, url, group_name, group_time, regional, nan_checks=False):
     """Write a healpix DataArray to the store defined by the URL."""
     name = da.name
     logger.info(f'{name} to zarr => {url}')
 
-    zarr_store = s3fs.S3Map(
-        root=url,
-        s3=get_jasmin_s3(), check=False)
-
     half_time = find_halfpast_time(da)
-    # Open the zarr store so I can get time coord to match with da's time coord.
-    ds_tpl = xr.open_zarr(zarr_store)
-
     # Match source (da) to target (zarr_store) times.
     # Get an index into zarr store to allow me to write block of da's data.
     timename = [c for c in da.coords if c.startswith('time')][0]
@@ -113,16 +106,23 @@ def healpix_da_to_zarr(da, url, group_name, regional, nan_checks=False):
         source_times_to_match = times_halfpast + pd.Timedelta(minutes=30)
     else:
         source_times_to_match = pd.DatetimeIndex(da[timename].values)
-    zarr_time_name = 'time'
-    target_times_to_match = pd.DatetimeIndex(ds_tpl[zarr_time_name].values)
 
-    da = da.rename(**{timename: zarr_time_name})
-    idx = np.argmin(np.abs(source_times_to_match[0] - target_times_to_match))
-    assert (np.abs(source_times_to_match - target_times_to_match[idx: idx + len(source_times_to_match)]) < pd.Timedelta(
+    da = da.rename(**{timename: 'time'})
+    # Find index of first time from our source data in the full time index.
+    idx = np.argmin(np.abs(source_times_to_match[0] - group_time))
+    assert (np.abs(source_times_to_match - group_time[idx: idx + len(source_times_to_match)]) < pd.Timedelta(
         minutes=5)).all(), 'source times do not match target times (thresh = 5 mins)'
 
     logger.debug(
         f'writing {name} to zarr store {url} (idx={idx}, time={source_times_to_match[0]})')
+    # Use time index to select a region to write data to.
+    if group_name.startswith('2d'):
+        region = {'time': slice(idx, idx + len(da['time'])), 'cell': slice(None)}
+    elif group_name.startswith('3d'):
+        region = {'time': slice(idx, idx + len(da['time'])), 'pressure': slice(None), 'cell': slice(None)}
+    else:
+        raise ValueError(f'group name {group_name} not recognized')
+
     if nan_checks:
         if np.isnan(da.values).all():
             logger.error(da)
@@ -130,13 +130,6 @@ def healpix_da_to_zarr(da, url, group_name, regional, nan_checks=False):
         if not regional and np.isnan(da.values).any():
             logger.warning(f'da {da.name} contains NaNs')
 
-    if group_name.startswith('2d'):
-        region = {zarr_time_name: slice(idx, idx + len(da[zarr_time_name])), 'cell': slice(None)}
-    elif group_name.startswith('3d'):
-        region = {zarr_time_name: slice(idx, idx + len(da[zarr_time_name])), 'pressure': slice(None),
-                  'cell': slice(None)}
-    else:
-        raise ValueError(f'group name {group_name} not recognized')
     # Handle errors if they arise (started happening on 26/4/25).
     asyncio.run(async_da_to_zarr_with_retries(da, zarr_store, region))
     return name
@@ -216,8 +209,9 @@ class UMProcessTasks:
         extractor = DataArrayExtractor(None, None)
         for key, map_item in name_map.items():
             short_name, long_name = key
-            cube = extractor.extract_cube(map_item, group_cubes, combine_cubes=False)
-            da = xr.DataArray.from_iris(cube).rename(short_name)
+            cubes = extractor.extract_cubes(map_item, group_cubes)
+            # Just use first cube here.
+            da = xr.DataArray.from_iris(cubes[0]).rename(short_name)
             da.attrs['long_name'] = long_name
             list_da.append(da)
 
@@ -437,6 +431,7 @@ class UMProcessTasks:
             group_constraint = group['constraint']
             name_map = group['name_map']
             chunks = group['chunks'][self.config['max_zoom']]
+            group_time = group['time']
             group_cubes = cubes.extract(group_constraint)
 
             # Handle each entry in the mapping from UM cubes to dataarrays.
@@ -460,7 +455,7 @@ class UMProcessTasks:
                 # Write this variable to the zarr store.
                 zarr_store_name = group['zarr_store']
                 url = self.config['zarr_store_url_tpl'].format(freq=zarr_store_name, zoom=zoom)
-                healpix_da_to_zarr(da_hp, url, group_name, self.config['regional'])
+                healpix_da_to_zarr(da_hp, url, group_name, group_time, self.config['regional'])
 
     def coarsen_healpix_region(self, task):
         """Coarsen the regions from source to target zooms, as defined by the task."""
