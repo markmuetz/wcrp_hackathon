@@ -58,7 +58,7 @@ async def async_da_to_zarr_with_retries(da, store, region, max_retries=5):
         raise Exception(f'failed to write {da.name} to zarr store {store} after {retries} retries')
 
 
-def model_level_to_pressure(cube, p, z):
+def model_level_to_pressure(cube, p, z, enforce_greater_than_zero=True):
     logger.debug(f're-level model level to pressure for {cube.name()}')
     cube = cube[-p.shape[0]:]
     assert (p.coord('time').points == cube.coord('time').points).all()
@@ -76,7 +76,12 @@ def model_level_to_pressure(cube, p, z):
         regridded_cube = relevel(cube[i], p[i], pressure_levels, interpolator=interpolator)
         # logger.trace(f'regridded_cube.data.sum() {regridded_cube.data.sum()}')
         # Fix 3D fields so that they are the right way round - invert output.
-        new_cube_data[i] = regridded_cube.data[:, ::-1]
+        new_cube_data[i] = regridded_cube.data[::-1]
+
+    if enforce_greater_than_zero:
+        # Some values are ending up as negatives (why? Perhaps due to linear extrap. outside domain?)
+        # Enfore greater than zero if so (these are all for mass_ fields - must by >= 0).
+        new_cube_data[new_cube_data < 0] = 0
 
     coords = [(cube.coord('time'), 0), (z.coord('pressure'), 1), (cube.coord('latitude'), 2),
               (cube.coord('longitude'), 3)]
