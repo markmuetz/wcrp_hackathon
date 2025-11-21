@@ -16,18 +16,24 @@ from loguru import logger
 import sys
 sys.path.insert(0, '../process_um_data')
 from um_latlon_pp_to_healpix_nc import UMLatLon2HealpixRegridder, gen_weights, get_limited_healpix
-from processing_config import chunks2d
 from healpix_coarsen import async_da_to_zarr_with_retries
 
+from imerg_config import vn
+
+chunks2d = {
+    9: (1, 12 * 4**9),
+    8: (1, 12 * 4**8),
+    7: (4, 12 * 4**7),
+    6: (4**2, 12 * 4**6),
+    5: (4**3, 12 * 4**5),
+    4: (4**4, 12 * 4**4),
+    3: (4**5, 12 * 4**3),
+    2: (4**6, 12 * 4**2),
+    1: (4**7, 12 * 4),
+    0: (4**8, 12),
+}
 
 s3cfg = dict([l.split(' = ') for l in Path('/home/users/mmuetz/.s3cfg').read_text().split('\n') if l])
-jasmin_s3 = s3fs.S3FileSystem(
-    anon=False,
-    secret=s3cfg['secret_key'],
-    key=s3cfg['access_key'],
-    client_kwargs={'endpoint_url': 'http://hackathon-o.s3.jc.rl.ac.uk'}
-)
-
 
 def fix_coords(ds, lat_dim="lat", lon_dim="lon"):
     # Find where longitude crosses from negative to positive (approx. where lon=0)
@@ -57,6 +63,13 @@ def da_to_zarr(da, zarr_store_url_tpl, zoom, nan_checks=False):
 
     # zarr_store_name = group['zarr_store']
     url = zarr_store_url_tpl.format(zoom=zoom)
+    jasmin_s3 = s3fs.S3FileSystem(
+        anon=False,
+        secret=s3cfg['secret_key'],
+        key=s3cfg['access_key'],
+        client_kwargs={'endpoint_url': 'http://hackathon-o.s3.jc.rl.ac.uk'}
+    )
+
     zarr_store = s3fs.S3Map(
         root=url,
         s3=jasmin_s3, check=False)
@@ -99,10 +112,6 @@ def da_to_healpix(da, zoom, regional_chunks=None):
                                           add_cyclic=True, regional=True, regional_chunks=regional_chunks)
 
     da_hp = regridder.regrid(da, lonname, latname)
-    # da_hp.attrs['UM_name'] = um_name
-    # da_hp.attrs['long_name'] = long_name
-    # da_hp.attrs['grid_mapping'] = 'healpix_nested'
-    # da_hp.attrs['healpix_zoom'] = zoom
 
     return da_hp
 
@@ -121,30 +130,36 @@ class ImergProcessTasks:
         self.debug_log = StringIO()
         logger.add(self.debug_log)
         deploy = 'dev'
-        self.zarr_store_url_tpl = f's3://sim-data/{deploy}/v1/IR_IMERG_combined/IR_IMERG_combined_V07B.hp_z{{zoom}}.zarr'
+        self.zarr_store_url_tpl = f's3://obs-data/{deploy}/{vn}/IR_IMERG_combined/IR_IMERG_combined_V07B.hp_z{{zoom}}.zarr'
         self.max_zoom = 9
 
     def create_empty_zarr_stores(self, task):
         inpath = task['inpath']
-        zarr_time = pd.date_range(task['first_date'], pd.Timestamp(task['last_date']) + pd.Timedelta(hours=1), freq='30min')
+        zarr_time = pd.date_range(task['first_date'], pd.Timestamp(task['last_date']) + pd.Timedelta(hours=1), freq='1h')
+
+        jasmin_s3 = s3fs.S3FileSystem(
+            anon=False,
+            secret=s3cfg['secret_key'],
+            key=s3cfg['access_key'],
+            client_kwargs={'endpoint_url': 'http://hackathon-o.s3.jc.rl.ac.uk'}
+        )
 
         metadata = {
             'regional': True,
-            'bounds': {
-                'lower_left_lat': -60,
-                'lower_left_lon': 0,
-                'upper_right_lat': 60,
-                'upper_right_lon': 360,
-            }
+            'geospatial_lat_min': -60,
+            'geospatial_lat_max': 60,
+            'geospatial_lon_min': 0,
+            'geospatial_lon_max': 360,
         }
 
-        ds = xr.open_dataset(inpath).pipe(fix_coords)
+        ds = xr.open_dataset(inpath).pipe(fix_coords).isel(time=slice(None, None, 2))
         for zoom in range(self.max_zoom + 1)[::-1]:
             chunks = chunks2d[zoom]
             # Multipls of 4**n chosen as these will align well with healpix grids.
             # Aim for 1-10MB per chunk, bearing in mind that this is saved with 4-byte float32s.
             logger.trace(f'chunks={chunks}')
-
+            # weights_path = Path('/gws/nopw/j04/hrcm/mmuetz/weights/') / weights_filename(da, zoom, lonname, latname,
+            #                                                                              add_cyclic, regional)
             ds_tpl = xr.Dataset()
             for name, da in ds.data_vars.items():
                 da_tpl = self.create_dataarray_template(da, chunks, zoom, zarr_time)
@@ -165,6 +180,7 @@ class ImergProcessTasks:
                 },
             )
             ds_tpl = ds_tpl.assign_coords(crs=crs)
+            ds_tpl.attrs.update(ds.attrs)
             ds_tpl.attrs.update(metadata)
 
             logger.info(f'Saving IMERG zoom={zoom}')
@@ -180,14 +196,13 @@ class ImergProcessTasks:
         lonname = 'lon'
         latname = 'lat'
 
-        if zoom == self.max_zoom:
-            weights_path = Path('/gws/nopw/j04/hrcm/mmuetz/weights/') / weights_filename(da, zoom, lonname, latname,
-                                                                                         True, True)
-            if not weights_path.exists():
-                logger.info(f'No weights for {da.name}, generating')
-                # chunks[-1] selects the spatial chunk.
-                gen_weights(da, zoom, lonname, latname, add_cyclic=True, regional=True,
-                            regional_chunks=chunks[-1], weights_path=weights_path)
+        weights_path = Path('/gws/nopw/j04/hrcm/mmuetz/weights/') / weights_filename(da, zoom, lonname, latname,
+                                                                                     True, True)
+        if not weights_path.exists():
+            logger.info(f'No weights for {da.name}, generating')
+            # chunks[-1] selects the spatial chunk.
+            gen_weights(da, zoom, lonname, latname, add_cyclic=True, regional=True,
+                        regional_chunks=chunks[-1], weights_path=weights_path)
 
         minlon, maxlon = da[lonname].values[[0, -1]]
         minlat, maxlat = da[latname].values[[0, -1]]
@@ -208,15 +223,16 @@ class ImergProcessTasks:
 
     def regrid(self, task):
         inpaths = task['inpaths']
-
-        chunks = chunks2d[self.max_zoom]
-
         logger.debug(f'Opening # paths: {len(inpaths)}')
-        ds = xr.open_mfdataset(inpaths).pipe(fix_coords)
+        ds = xr.open_mfdataset(inpaths).pipe(fix_coords).isel(time=slice(None, None, 2))
+
+        zoom = self.max_zoom
+        chunks = chunks2d[zoom]
+
         for name, da in ds.data_vars.items():
             logger.info(f'Regridding {name}')
-            da_hp = da_to_healpix(da, self.max_zoom, regional_chunks=chunks[-1])
-            da_to_zarr(da_hp, self.zarr_store_url_tpl, self.max_zoom)
+            da_hp = da_to_healpix(da, zoom, regional_chunks=chunks[-1])
+            da_to_zarr(da_hp, self.zarr_store_url_tpl, zoom)
 
     # def coarsen_healpix_region(self, task):
     #     dim = task['dim']

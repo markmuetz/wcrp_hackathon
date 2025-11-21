@@ -7,6 +7,8 @@ import click
 import pandas as pd
 from loguru import logger
 
+from imerg_config import vn
+
 SLURM_SCRIPT_ARRAY = """#!/bin/bash
 #SBATCH --job-name="{job_name}"
 #SBATCH --time=10:00:00
@@ -135,7 +137,7 @@ def process(ctx):
     logger.debug(f'using {nconcurrent_tasks} concurrent tasks')
     basedir = Path('/gws/nopw/j04/hrcm/mmuetz/obs/IR_IMERG_Combined_V07B')
     logger.debug(f'basedir: {basedir}')
-    donedir = Path('/gws/nopw/j04/hrcm/mmuetz/slurm_done/dev/ir_imerg_combined/v1')
+    donedir = Path(f'/gws/nopw/j04/hrcm/mmuetz/slurm_done/obs/dev/ir_imerg_combined/{vn}')
     logger.debug(f'donedir: {donedir}')
     donepath_tpl = 'imerg.{task}.{date}.done'
     logger.debug(f'donepath_tpl: {donepath_tpl}')

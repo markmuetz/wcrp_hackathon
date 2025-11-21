@@ -1,6 +1,10 @@
+"""Entry point into submitting SLURM jobs.
+
+* Works by scanning input directories, then builds a list of jobs based on whether each job has already been done yet.
+* Uses click to build a nice CLI.
+"""
 import math
 import sys
-import asyncio
 import json
 import subprocess as sp
 from collections import defaultdict
@@ -8,19 +12,19 @@ from itertools import batched
 from pathlib import Path
 
 import click
-import numpy as np
 import pandas as pd
 from loguru import logger
 
-# from calc_completed_chunks import find_tgt_calcs, find_tgt_time_calcs
-from calc_completed_chunks import async_retry_open_zarr
-from processing_config import processing_config, output_vn
+from cube_to_da_mapping import DataArrayExtractor
+from um_processing_config import slurm_config, processing_config, time2d, time3d
+from util import sysrun
 
+# SLURB script template - filled in and written to a file for calling with `sbatch`.
 SLURM_SCRIPT_ARRAY = """#!/bin/bash
 #SBATCH --job-name="{job_name}"
 #SBATCH --time=10:00:00
 #SBATCH --mem={mem}
-#SBATCH --account=hrcm
+#SBATCH --account={account}
 #SBATCH --ntasks={ntasks}
 #SBATCH --cpus-per-task={cpus_per_task}
 #SBATCH --partition={partition}
@@ -29,9 +33,11 @@ SLURM_SCRIPT_ARRAY = """#!/bin/bash
 #SBATCH -o slurm/output/{job_name}_{config_key}_{date_string}_%A_%a.out
 #SBATCH -e slurm/output/{job_name}_{config_key}_{date_string}_%A_%a.err
 #SBATCH --comment={comment}
-# These nodes repeatedly fail to be able to read the kscale GWS.
-#SBATCH --exclude=host1012,host1077,host1087,host1106,host1186
 {dependency}
+
+# These nodes repeatedly fail to be able to read the kscale GWS.
+# Apparently these have been fixed:
+# I used to have this #SBATCH --exclude=host1012,host1077,host1087,host1106,host1186,host1080,host1197,host1135,host1238,host1222,host1234
 
 # Quick check to see if it can access the kscale GWS.
 if ! ls /gws/nopw/j04/kscale > /dev/null 2>&1; then
@@ -44,12 +50,8 @@ ARRAY_INDEX=${{SLURM_ARRAY_TASK_ID}}
 python um_process_tasks.py slurm {tasks_path} ${{ARRAY_INDEX}}
 """
 
-
-def sysrun(cmd):
-    return sp.run(cmd, check=True, shell=True, stdout=sp.PIPE, stderr=sp.PIPE, encoding='utf8')
-
-
 def sbatch(slurm_script_path):
+    """Submit script using sbatch."""
     try:
         return sysrun(f'sbatch --parsable {slurm_script_path}').stdout.strip()
     except sp.CalledProcessError as e:
@@ -58,12 +60,13 @@ def sbatch(slurm_script_path):
         raise
 
 
-def parse_date_from_pp_path(path):
+def _parse_date_from_pp_path(path):
     datestr = path.stem.split('.')[-1].split('_')[1]
     return pd.to_datetime(datestr, format="%Y%m%dT%H")
 
 
 def write_tasks_slurm_job_array(config_key, tasks, job_name, depends_on=None, **kwargs):
+    """Write out a script for submission."""
     now = pd.Timestamp.now()
     date_string = now.strftime("%Y%m%d_%H%M%S")
 
@@ -83,15 +86,7 @@ def write_tasks_slurm_job_array(config_key, tasks, job_name, depends_on=None, **
 
     slurm_script_path = Path(f'slurm/scripts/script_{job_name}_{config_key}_{date_string}.sh')
     njobs = len(tasks) - 1
-    slurm_kwargs = dict(
-        ntasks=1,
-        cpus_per_task=1,
-        partition='standard',
-        qos='standard',
-        mem=100000,
-        nconcurrent_tasks=40,
-    )
-    slurm_kwargs.update(kwargs)
+    slurm_kwargs = {**slurm_config, **kwargs}
     script_kwargs = dict(
         job_name=job_name,
         config_key=config_key,
@@ -108,7 +103,7 @@ def write_tasks_slurm_job_array(config_key, tasks, job_name, depends_on=None, **
 
 
 def find_dyamond3_pp_dates_to_paths(basedir):
-    # Search for pp_paths with a specific date (N.B. filename sensitive).
+    """Search for pp_paths with a specific date (N.B. filename sensitive)."""
     pp_paths = sorted(basedir.glob('field.pp/apve*/**/*.pp'))
     logger.debug(f'found {len(pp_paths)} pp paths')
     pp_paths = [p for p in pp_paths if p.is_file()]
@@ -118,7 +113,7 @@ def find_dyamond3_pp_dates_to_paths(basedir):
         # Not sure what's in them either.
         if 'apvere' in path.stem:
             continue
-        dates_to_paths[parse_date_from_pp_path(path)].append(path)
+        dates_to_paths[_parse_date_from_pp_path(path)].append(path)
     # Only keep completed downloads.
     dates_to_paths = {
         k: v for k, v in dates_to_paths.items()
@@ -164,6 +159,14 @@ def cli(ctx, dry_run, debug, trace, nconcurrent_tasks):
             path.mkdir(parents=True, exist_ok=True)
 
 
+@cli.result_callback()
+@click.pass_context
+def cli_exit(ctx, result, **kwargs):
+    # This runs after any subcommand completes
+    if ctx.obj['dry_run']:
+        logger.warning("Dry run: not launching any jobs")
+
+
 @cli.command()
 @click.argument('config_key')
 @click.pass_context
@@ -189,12 +192,14 @@ def process(ctx, config_key):
     # Build a list of tasks for all donepaths that don't exist.
     tasks = []
     for date in dates_to_paths:
-        # if not (date.year == 2020 and date.month == 1):
-        #     continue
+        # TODO:!!
+        if date > pd.Timestamp('2020-02-01 00:00'):
+            break
         if date == config['first_date']:
             create_donepath = donedir / donepath_tpl.format(task='create_empty_zarr_store', date=date)
             logger.debug(create_donepath)
             if not create_donepath.exists():
+                # Create a task to create empty zarr stores on first date and if not already completed.
                 logger.info('Creating zarr store')
                 create_task = {
                     'task_type': 'create_empty_zarr_stores',
@@ -217,6 +222,7 @@ def process(ctx, config_key):
         if donepath.exists():
             logger.debug(f'{date}: already processed')
         else:
+            # Create regrid task for a given date.
             logger.info(f'{date}: processing')
             tasks.append(
                 {
@@ -230,6 +236,7 @@ def process(ctx, config_key):
 
     regrid_jobid = None
     if len(tasks):
+        # Run tasks.
         logger.info(f'Running {len(tasks)} tasks')
         slurm_script_path = write_tasks_slurm_job_array(config_key, tasks, 'regrid',
                                                         nconcurrent_tasks=nconcurrent_tasks,
@@ -247,48 +254,30 @@ def process(ctx, config_key):
 
 
 @cli.command()
-@click.option('--nbatch', '-N', default=5)
+@click.option('--nbatch', '-B', default=5)
 @click.option('--endtime', '-E', default='2021-03-01 00:00')
 @click.argument('config_key')
 @click.pass_context
 def coarsen(ctx, nbatch, endtime, config_key):
-    # This needs to be it's own command. The reason is that I need to be able to examine a completed
-    # zarr store to be able to work out how to divvy up the work. This can only been done once the above have completed,
-    # and can't be calculated in advance. It would be possible to have a job whose sole purpose was to do this calc and
-    # then launch other jobs, but this seems overly complicated. Just wait until these have completed then launch.
-    # coarsen_task = {
-    #     'task_type': 'coarsen_healpix_region',
-    #     'config_key': config_key,
-    # }
-    # slurm_script_path = write_tasks_slurm_job_array(config_key, [coarsen_task], 'coarsen', nconcurrent_tasks=nconcurrent_tasks,
-    #                                                 depends_on=regrid_jobid)
-    # logger.debug(slurm_script_path)
-    # coarsen_jobid = sysrun(f'sbatch --parsable {slurm_script_path}').stdout.strip()
-    # jobids.append(coarsen_jobid)
     nconcurrent_tasks = ctx.obj['nconcurrent_tasks']
     config = processing_config[config_key]
-    freqs = {
-        '2d': 'PT1H',
-        '3d': 'PT3H',
-    }
-    # Last variables for each.
     jobids = []
     dummy_donepath_tpl = config['donepath_tpl']
     dummy_donepath = dummy_donepath_tpl.format(task='dummy', date='dummy')
     donereldir = Path(dummy_donepath).parent
     donepath_tpl = str(config['donedir'] / donereldir / 'coarsen/{dim}/z{zoom}/{job_id}.done')
-
     max_zoom = config['max_zoom']
 
     for dim in ['2d', '3d']:
         prev_zoom_job_id = None
-
-        rel_url_tpl = config['zarr_store_url_tpl'][5:]  # chop off 's3://'
-        rel_url = rel_url_tpl.format(freq=freqs[dim], zoom=10)
-        src_ds = asyncio.run(async_retry_open_zarr('http://hackathon-o.s3.jc.rl.ac.uk/' + rel_url))
+        if dim == '2d':
+            time_idx = time2d
+        elif dim == '3d':
+            time_idx = time3d
+        else:
+            raise Exception(f'unknown dim: {dim}')
         if endtime is not None:
-            src_ds = src_ds.sel(time=slice(endtime))
-        time_idx = np.arange(len(src_ds.time))
+            time_idx = time_idx[time_idx <= endtime]
 
         chunks = config['groups'][dim]['chunks']
 
@@ -334,12 +323,10 @@ def coarsen(ctx, nbatch, endtime, config_key):
                     depends_on=prev_zoom_job_id,
                     partition='standard',
                     nconcurrent_tasks=nconcurrent_tasks,
+                    mem=mem,
                     qos='high',
-                    # I think you have to use 48 (instead of 12 - only two checked) because
-                    # otherwise you get multiple dask LocalClusters starting on same node.
                     # cpus_per_task=48,  # maxes out at 6 tasks/288 cpus because of max cpus.
                     cpus_per_task=12,  # maxes out at 24 tasks/288 cpus because of max cpus.
-                    mem=mem,
                 )
 
                 logger.debug(slurm_script_path)
@@ -358,6 +345,120 @@ def ls(ctx):
     for key in processing_config:
         print(key)
 
+
+@cli.command()
+@click.argument('config_key')
+@click.option('--date', '-d', default=None)
+@click.option('--output-file', '-o', default=None)
+@click.pass_context
+def check_output_mapping(ctx, config_key, date, output_file):
+    import iris
+    import operator
+
+    operator_symbol_map = {
+        operator.add: '+',
+        operator.sub: '-',
+        operator.mul: '*',
+        operator.truediv: '/',
+    }
+    if config_key == 'all':
+        config_keys = list(processing_config)
+    else:
+        config_keys = [config_key]
+
+    cols = ['expt', 'store', 'short_name', 'long_name', 'present', 'cube_name', 'stash_code', 'extra_attrs']
+    data = []
+    for config_key in config_keys:
+        # TODO: can't load data for Africa or SEA CTC??
+        if 'Africa' in config_key or 'SEA' in config_key or 'CTC_km4p4_CoMA9' in config_key:
+            continue
+        logger.info(f'processing {config_key}')
+        config = processing_config[config_key]
+        if date is None:
+            date = config['first_date']
+
+        basedir = config['basedir']
+        dates_to_paths = find_dyamond3_pp_dates_to_paths(basedir)
+        inpaths = dates_to_paths[date]
+        cubes = iris.load(inpaths)
+
+        extractor = DataArrayExtractor(None, None)
+        for group_name, group in config['groups'].items():
+            logger.info(group_name)
+
+            group_constraint = group['constraint']
+            name_map = group['name_map']
+            store = group['zarr_store']
+
+            group_cubes = cubes.extract(group_constraint)
+            for key, map_item in name_map.items():
+                logger.debug(f'  {key}: {map_item}')
+                short_name, long_name = key
+                try:
+                    item_cubes = extractor.extract_cubes(map_item, group_cubes)
+                    if len(item_cubes) == 1:
+                        cube = item_cubes[0]
+                        cubestr = cube.name()
+                        stashstr = cube.attributes['STASH']
+                    else:
+                        cube = item_cubes[0]
+                        ops = map_item.ops
+                        cube_list = [cube.name()]
+                        stash_list = [str(cube.attributes['STASH'])]
+                        for op, next_cube in zip(ops, item_cubes[1:]):
+                            cube_list.extend([operator_symbol_map[op], next_cube.name()])
+                            stash_list.extend([operator_symbol_map[op], str(next_cube.attributes['STASH'])])
+                        cubestr = ' '.join(cube_list)
+                        stashstr = ' '.join(stash_list)
+                    data.append(
+                        str(v) for v in [config_key, store, short_name, long_name, True, cubestr, stashstr, map_item.extra_attrs]
+                    )
+                except iris.exceptions.ConstraintMismatchError as cme:
+                    data.append(
+                        str(v) for v in [config_key, store, short_name, long_name, False, None, None, map_item.extra_attrs]
+                    )
+
+    df = pd.DataFrame(data, columns=cols)
+    if output_file is not None:
+        df.to_csv(output_file, index=False)
+    else:
+        print(df)
+
+
+def title(msg):
+    print(msg)
+    print('=' * len(msg))
+
+@cli.command()
+@click.option('--input-file', '-i')
+@click.pass_context
+def analyse_output_mapping(ctx, input_file):
+    df = pd.read_csv(input_file)
+
+    N = len(df.expt.unique())
+    comparison_cols = df.drop(columns='expt')
+    # Get a df with the number of times each row (ignoring 'expt') is duplicated and combine with existing df.
+    duplicate_counts = comparison_cols.groupby(comparison_cols.columns.tolist()).size()
+    df_with_counts = df.merge(
+        duplicate_counts.rename("counts"),
+        how='left',
+        left_on=comparison_cols.columns.tolist(),
+        right_index=True
+    )
+
+    # Find the first set of non-duplicated rows for any row which appears as many times as there are expts.
+    # i.e. each row is the same across all expts.
+    title('The same across all expts:')
+    print(df[df_with_counts.counts == N][
+              ~df_with_counts[df_with_counts.counts == N].drop(columns='expt').duplicated()].drop(columns='expt'))
+
+    # Find any short_name that is different across *any* expt, or is not present in any expt.
+    interesting_inputs = set()
+    interesting_inputs.update(df_with_counts[df_with_counts.counts < N]['short_name'].unique().tolist())
+    interesting_inputs.update(df_with_counts[df_with_counts.present == False]['short_name'].unique().tolist())
+    for var in interesting_inputs:
+        title(f'Interesting var: {var}')
+        print(df[df.short_name == var])
 
 if __name__ == '__main__':
     cli(obj={})

@@ -59,11 +59,11 @@ print('total duration:', df_comp.end.max() - df_comp.start.min())
 print()
 varname = 'elapsed'
 print(varname)
-for meth in ['mean', 'min', 'max']:
+for meth in ['min', 'mean', 'max']:
     print(f'  {meth:<5}: {getattr(df_comp[varname], meth)()}')
 varname = 'maxrss'
 print(varname)
-for meth in ['mean', 'min', 'max']:
+for meth in ['min', 'mean', 'max']:
     print(f'  {meth:<5}: {getattr(df_comp[varname], meth)():.1f}G')
 # print('min:', df_comp[['elapsed', 'maxrss']].min())
 # print('max:', df_comp[['elapsed', 'maxrss']].max())
