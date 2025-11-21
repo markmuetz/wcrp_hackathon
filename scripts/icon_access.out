@@ -1,0 +1,106 @@
+Traceback (most recent call last):
+  File "/home/users/mmuetz/miniforge3/envs/hackathon_env/lib/python3.12/site-packages/aiohttp/connector.py", line 1123, in _wrap_create_connection
+    connection = await self._loop.create_connection(
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/users/mmuetz/miniforge3/envs/hackathon_env/lib/python3.12/asyncio/base_events.py", line 1159, in create_connection
+    transport, protocol = await self._create_connection_transport(
+                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/users/mmuetz/miniforge3/envs/hackathon_env/lib/python3.12/asyncio/base_events.py", line 1192, in _create_connection_transport
+    await waiter
+  File "/home/users/mmuetz/miniforge3/envs/hackathon_env/lib/python3.12/asyncio/sslproto.py", line 581, in _on_handshake_complete
+    raise handshake_exc
+  File "/home/users/mmuetz/miniforge3/envs/hackathon_env/lib/python3.12/asyncio/sslproto.py", line 563, in _do_handshake
+    self._sslobj.do_handshake()
+  File "/home/users/mmuetz/miniforge3/envs/hackathon_env/lib/python3.12/ssl.py", line 916, in do_handshake
+    self._sslobj.do_handshake()
+ssl.SSLCertVerificationError: [SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: unable to get local issuer certificate (_ssl.c:1010)
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/home/users/mmuetz/miniforge3/envs/hackathon_env/lib/python3.12/site-packages/zarr/storage.py", line 1446, in __getitem__
+    return self.map[key]
+           ~~~~~~~~^^^^^
+  File "/home/users/mmuetz/miniforge3/envs/hackathon_env/lib/python3.12/site-packages/fsspec/mapping.py", line 155, in __getitem__
+    result = self.fs.cat(k)
+             ^^^^^^^^^^^^^^
+  File "/home/users/mmuetz/miniforge3/envs/hackathon_env/lib/python3.12/site-packages/fsspec/asyn.py", line 118, in wrapper
+    return sync(self.loop, func, *args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/users/mmuetz/miniforge3/envs/hackathon_env/lib/python3.12/site-packages/fsspec/asyn.py", line 103, in sync
+    raise return_result
+  File "/home/users/mmuetz/miniforge3/envs/hackathon_env/lib/python3.12/site-packages/fsspec/asyn.py", line 56, in _runner
+    result[0] = await coro
+                ^^^^^^^^^^
+  File "/home/users/mmuetz/miniforge3/envs/hackathon_env/lib/python3.12/site-packages/fsspec/asyn.py", line 465, in _cat
+    raise ex
+  File "/home/users/mmuetz/miniforge3/envs/hackathon_env/lib/python3.12/site-packages/fsspec/asyn.py", line 245, in _run_coro
+    return await asyncio.wait_for(coro, timeout=timeout), i
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/users/mmuetz/miniforge3/envs/hackathon_env/lib/python3.12/asyncio/tasks.py", line 520, in wait_for
+    return await fut
+           ^^^^^^^^^
+  File "/home/users/mmuetz/miniforge3/envs/hackathon_env/lib/python3.12/site-packages/fsspec/implementations/http.py", line 234, in _cat_file
+    async with session.get(self.encode_url(url), **kw) as r:
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/users/mmuetz/miniforge3/envs/hackathon_env/lib/python3.12/site-packages/aiohttp/client.py", line 1425, in __aenter__
+    self._resp: _RetType = await self._coro
+                           ^^^^^^^^^^^^^^^^
+  File "/home/users/mmuetz/miniforge3/envs/hackathon_env/lib/python3.12/site-packages/aiohttp/client.py", line 703, in _request
+    conn = await self._connector.connect(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/users/mmuetz/miniforge3/envs/hackathon_env/lib/python3.12/site-packages/aiohttp/connector.py", line 548, in connect
+    proto = await self._create_connection(req, traces, timeout)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/users/mmuetz/miniforge3/envs/hackathon_env/lib/python3.12/site-packages/aiohttp/connector.py", line 1056, in _create_connection
+    _, proto = await self._create_direct_connection(req, traces, timeout)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/users/mmuetz/miniforge3/envs/hackathon_env/lib/python3.12/site-packages/aiohttp/connector.py", line 1411, in _create_direct_connection
+    raise last_exc
+  File "/home/users/mmuetz/miniforge3/envs/hackathon_env/lib/python3.12/site-packages/aiohttp/connector.py", line 1380, in _create_direct_connection
+    transp, proto = await self._wrap_create_connection(
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/users/mmuetz/miniforge3/envs/hackathon_env/lib/python3.12/site-packages/aiohttp/connector.py", line 1129, in _wrap_create_connection
+    raise ClientConnectorCertificateError(req.connection_key, exc) from exc
+aiohttp.client_exceptions.ClientConnectorCertificateError: Cannot connect to host s3.eu-dkrz-1.dkrz.cloud:443 ssl:True [SSLCertVerificationError: (1, '[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: unable to get local issuer certificate (_ssl.c:1010)')]
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/home/users/mmuetz/projects/wcrp_hackathon/scripts/icon_access.py", line 4, in <module>
+    ds = cat['icon_d3hp003'](zoom=7).to_dask()
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/users/mmuetz/miniforge3/envs/hackathon_env/lib/python3.12/site-packages/intake_xarray/base.py", line 69, in to_dask
+    return self.read_chunked()
+           ^^^^^^^^^^^^^^^^^^^
+  File "/home/users/mmuetz/miniforge3/envs/hackathon_env/lib/python3.12/site-packages/intake_xarray/base.py", line 44, in read_chunked
+    self._load_metadata()
+  File "/home/users/mmuetz/miniforge3/envs/hackathon_env/lib/python3.12/site-packages/intake/source/base.py", line 283, in _load_metadata
+    self._schema = self._get_schema()
+                   ^^^^^^^^^^^^^^^^^^
+  File "/home/users/mmuetz/miniforge3/envs/hackathon_env/lib/python3.12/site-packages/intake_xarray/base.py", line 18, in _get_schema
+    self._open_dataset()
+  File "/home/users/mmuetz/miniforge3/envs/hackathon_env/lib/python3.12/site-packages/intake_xarray/xzarr.py", line 46, in _open_dataset
+    self._ds = xr.open_dataset(self.urlpath, **kw)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/users/mmuetz/miniforge3/envs/hackathon_env/lib/python3.12/site-packages/xarray/backends/api.py", line 686, in open_dataset
+    backend_ds = backend.open_dataset(
+                 ^^^^^^^^^^^^^^^^^^^^^
+  File "/home/users/mmuetz/miniforge3/envs/hackathon_env/lib/python3.12/site-packages/xarray/backends/zarr.py", line 1563, in open_dataset
+    store = ZarrStore.open_group(
+            ^^^^^^^^^^^^^^^^^^^^^
+  File "/home/users/mmuetz/miniforge3/envs/hackathon_env/lib/python3.12/site-packages/xarray/backends/zarr.py", line 700, in open_group
+    ) = _get_open_params(
+        ^^^^^^^^^^^^^^^^^
+  File "/home/users/mmuetz/miniforge3/envs/hackathon_env/lib/python3.12/site-packages/xarray/backends/zarr.py", line 1785, in _get_open_params
+    zarr_group = zarr.open_consolidated(store, **open_kwargs)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/users/mmuetz/miniforge3/envs/hackathon_env/lib/python3.12/site-packages/zarr/convenience.py", line 1362, in open_consolidated
+    meta_store = ConsolidatedStoreClass(store, metadata_key=metadata_key)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/users/mmuetz/miniforge3/envs/hackathon_env/lib/python3.12/site-packages/zarr/storage.py", line 3045, in __init__
+    meta = json_loads(self.store[metadata_key])
+                      ~~~~~~~~~~^^^^^^^^^^^^^^
+  File "/home/users/mmuetz/miniforge3/envs/hackathon_env/lib/python3.12/site-packages/zarr/storage.py", line 1448, in __getitem__
+    raise KeyError(key) from e
+KeyError: '.zmetadata'
